@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "decbackup"
+version = "0.1.0"
+description = "Python clone of Stormshield SNS's decbackup: decrypt and verify .bkup appliance backups without the device"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "fl0l0u" }]
+keywords = ["stormshield", "sns", "backup", "decbackup", "pkcs7", "forensics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+    "Topic :: System :: Archiving",
+]
+dependencies = ["cryptography>=41"]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.4.0"]
+
+[project.scripts]
+decbackup = "decbackup.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fl0l0u/decbackup"
+Documentation = "https://github.com/fl0l0u/decbackup#readme"
+Repository = "https://github.com/fl0l0u/decbackup.git"
+Issues = "https://github.com/fl0l0u/decbackup/issues"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["legacy", "analysis"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.setuptools.packages.find]
+include = ["decbackup*"]
+
+[tool.setuptools.package-data]
+decbackup = ["certs/*.der"]
