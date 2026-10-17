@@ -74,6 +74,13 @@ run("cert-tamper", "cert.bkup", None, "testpass", code=7)
 run("majversion3", "mv3.bkup", None, "testpass", code=12)
 run("version-padded-9", "v9.bkup", None, "testpass", code=7)
 
+# v1 probes: same-length majversion 2->1 edit of a real v4.2.8 backup with
+# a copied (valid) trailer; content re-encrypted under the v1 KDF. Correct
+# v1 key -> decrypts, digest check fails (7) exactly as on both devices;
+# shifted-salt key -> padding failure (13). Device-validated byte-for-byte.
+run("v1-probe", "v1probe.bkup", None, "testpass", code=7)
+run("v1-badkey", "v1badkey.bkup", None, "testpass", code=13)
+
 # --- header ----------------------------------------------------------------
 text, fields = parse_header((V / "test.bkup").read_bytes()[:0x400])
 check("header: majversion", fields.get("majversion") == "2")
@@ -90,7 +97,12 @@ k1, iv1, algo = _crypto_datas(fields, 2, "testpass")
 check("v2 dispatch matches direct PBKDF2", k1 == key and algo == 1)
 check("v2 iv", iv1 == bytes.fromhex(fields["iv"]))
 
-# v1: SHA1(salt || password)[:16] — static RE, not empirically cross-checked
+# v1: SHA1(salt || password)[:16] — empirically confirmed on v4.2.8 and
+# v5.1.4 device binaries (v1 probe matrix: correct salt -> 7, shifted -> 13)
+check("v1 key salt", V1_KEY_SALT ==
+      bytes.fromhex("2807a5ef00620c4b62f32e0985e30e4e"))
+check("v1 iv salt", V1_IV_SALT ==
+      bytes.fromhex("463538798d48c8c0323df3e75109d221"))
 check("v1 key", derive_key_v1(b"x") ==
       hashlib.sha1(V1_KEY_SALT + b"x").digest()[:16])
 check("v1 iv", derive_iv_v1(b"x") ==

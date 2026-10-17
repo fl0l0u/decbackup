@@ -55,7 +55,7 @@ processing is behaviourally equivalent.
 0x4000, the streaming loop's EOF detection hits the zero-length-read path
 and the tool fails. A bug; the clone simply reads the whole file.
 
-## 3. Key derivation (CONFIRMED for v2 / static-RE for v1)
+## 3. Key derivation (CONFIRMED v2 and v1)
 
 Selected by header `majversion` (`fwcrypto_get_backup_majversion`,
 default 1 when the key is absent; 1 or 2 accepted, anything else → error 12
@@ -63,12 +63,20 @@ default 1 when the key is absent; 1 or 2 accepted, anything else → error 12
 
 * **v2** (`fwcrypto_derivekey`): `key = PBKDF2-HMAC-SHA256(password,
   unhex(salt), pbkdf_iterations, 16)`; `iv = unhex(iv)`.
-* **v1**: `key = SHA1(212807a5ef00620c4b62f32e0985e30e || password)[:16]`,
-  `iv = SHA1(00463538798d48c8c0323df3e75109d2 || password)[:16]` (salts at
-  libncrypto .rodata 0x1b41f/0x1b40f). For sizes >20 the fill is
+* **v1**: `key = SHA1(2807a5ef00620c4b62f32e0985e30e4e || password)[:16]`,
+  `iv = SHA1(463538798d48c8c0323df3e75109d221 || password)[:16]`. The two
+  salts are consecutive 16-byte windows of one 48-byte pool
+  (`463538798d…09d221` + `2807a5ef00…0e4e`); the getters' `lea` targets
+  resolve to pool+0 and pool+16 in *both* the 5.1.4 and 4.2.8 binaries.
+  An earlier reading (`212807a5…` / `0046353879…`) was a one-byte
+  vaddr→file-offset slip, corrected in §10 by direct experiment.
+  For sizes >20 the fill is
   `buf[i] = (size-1 + (size-i)*0xEB) & 0xFF` — unreachable for AES-128.
   5.1.4 `encbackup` cannot emit v1 (no version flag in getopt
-  `i:o:p:c:t:n:P`), so v1 is **not empirically cross-checked**.
+  `i:o:p:c:t:n:P`), but the **key derivation is now empirically confirmed**
+  (§10): a v1-header archive whose ciphertext was made with these
+  constants decrypts cleanly on both VMs (reaches the digest check → 7),
+  while the shifted-salt variant fails at padding (→ 13) on both.
 
 Cipher: `algo=1` → AES-128-CBC (`EVP_aes_128_cbc`); anything else → error
 32 `unsupported algo`.
@@ -149,6 +157,7 @@ Usage : () -i <backup> -o <output archive>
 | 6 | signature trailer unparsable / doesn't fit first chunk; crypto params missing | X=0 → 6; sed-shifted files → 6 |
 | 7 | verification failed (content digest, attribute signature, chain) | 1-byte ciphertext tamper → 7; cert bytes zeroed → 7; header edit → 7 |
 | 8 | file shorter than 0x400 | trunc.bkup → 8 |
+| 11 | short write to the output file (residual default err; seen when `-o /dev/stdout` truncates the stream) | 4.2.8 binary, v1 probe to /dev/stdout |
 | 12 | unknown majversion (`Unknown backup majversion: %d`) or version gate (`Invalid archive`) | majversion=3 → 12; version=9 → 12 |
 | 13 | decrypt failed — in practice wrong password (EVP_CipherFinal padding) | wrongpass → 13 |
 | 32 | unsupported algo | algo=2 → 32 |
@@ -194,8 +203,10 @@ untested. Real backups always carry dotted versions → always pass.
 
 ## 8. Open items / uncertainties
 
-* v1 KDF not cross-checked against a real v1 backup (tool can't make one);
-  constants and fill progression are static-RE.
+* v1 KDF **empirically confirmed** on both VMs (§10). The IV window is
+  static-confirmed (identical `lea`-pool layout in both binaries) but
+  RC-invisible in probes (CBC padding ignores the IV and the digest can
+  never match a copied trailer); it is the pool[0:16] window.
 * Exact digit-count cap of the version gate parser (implemented ≤4).
 * Error code when the *output* file can't be created: assumed 1.
 * `pbkdf_iterations` default when the key is missing: assumed 1
@@ -215,3 +226,62 @@ probe files (sha256 listed in `analysis/probes.py` history).
 | big.bkup | big.tar | `BigPass789` | 0 |
 | mid.bkup | mid.tar (23 KiB, multi-chunk) | `MidPass321` | 0 |
 | trunc/xzero/ct/cert/mv3/v9 | — | `testpass` | 8/6/7/7/12/7 |
+| v1probe.bkup / v1badkey.bkup | v428.tar (§10) | `testpass` | 7 / 13 |
+
+## 10. Second VM: SNS v4.2.8 (the-4.2.8-VM)
+
+Older box, same EVA1-VM hardware line, serial `VMSNSX00Z0000A0`, clock
+pinned to 2020. All four binaries differ from 5.1.4
+(`decbackup fca8df91…`, `libncrypto.so ddca97b1…`). Its `decbackup` usage
+string lacks the `-P` line; `encbackup` still writes **majversion=2**
+(PBKDF2, 10000 iterations) with the identical container layout — so no
+release in this VM line emits v1.
+
+* **Cross-version compatibility (CONFIRMED)**: the clone decrypts a
+  v4.2.8-produced backup byte-exactly, and the v4.2.8 device `decbackup`
+  reproduces the same sha256. Same PKI chain as 5.1.4
+  (device ← Products CA ← Products Root CA).
+* **v1 path present and identical in structure**: `upd_update` (flags&2)
+  → `fwcrypto_get_backup_majversion` → `==1` branch calls
+  `fwcrypto_keyfrompasswd(pass, 0x10)` + `fwcrypto_ivfrompasswd(pass, 0x10)`
+  (0xd692/0xd6ac), then the same streaming decrypt + `VerifySignatureFinal`
+  tail — v1 archives are signed containers too, and VSI failure is still
+  fail-closed (error 6). The version gate (`cmp ax,1` → 12) is the same.
+* **v1 salt windows**: both binaries read the *same* windows of the shared
+  48-byte pool (key = pool+16, iv = pool+0). Resolved by `lea`
+  instruction-by-instruction in both (`sns` 0x16d8d→file 0x1b420,
+  0x16ac4→0x1b410; `sns428` 0x10d98→0x18030, 0x10aaf→0x18020), and
+  confirmed empirically with the probe matrix below.
+* **v1 KDF probe matrix** (v1 header via same-length `majversion=2→1`
+  edit of a real v4.2.8 backup, copied valid trailer, content re-encrypted
+  under each salt×iv combination; padding validity is the key oracle, CBC
+  IV cannot affect it):
+
+  | ciphertext made with | old-VM (4.2.8) | 5.1.4 VM |
+  |---|---|---|
+  | pool+16 key (correct) | 7 (both IVs) | 7 |
+  | shifted key `212807a5…` | 13 | 13 |
+
+  `7` = decryption succeeded, digest check failed (expected: the trailer's
+  messageDigest covers the original v2 content). This proves the key
+  window on both binaries; the IV window follows from the identical
+  `lea`-pool layout (RC-invisible by construction).
+* **4.2.8 embedded trust blobs** (libncrypto .data, six certs): the two
+  5.1.4 roots + Enrollment Products CA, **no NETASQ root**, plus three
+  service certs for the update path (`firmware.sns.local`,
+  `update.sns.local`, `signvmkit.sns.local`, issued by "Stormshield
+  Network Security CA"). The NETASQ-issuer special case in the verify
+  callback therefore postdates 4.2.8. 4.2.8 also exposes older API
+  surface (`fwcrypto_dec_maj_file`, `fwcrypto_check_maj`,
+  `fwcrypto_backup_read_algo`, 3DES/Blowfish/DES helpers).
+* **Error 11** appears on the old binary: the stream loop sets
+  `[err]=11` as the default before each output `fwrite` and a failing
+  `EVP_CipherFinal`/short-write path leaves it in place. Observed when
+  pointing `-o` at `/dev/stdout` (pipe semantics + `remove()` of the
+  symlink); a regular output file behaves as on 5.1.4.
+* **Ingestion channel** (SCP blocked, echo-chunks proved lossy — csh
+  `echo` corrupted some base64 payloads at identical length): pipe bytes
+  straight through ssh stdin into `dd of=/tmp/x bs=<len> count=1`, then
+  `openssl base64 -A -d -in /tmp/x -out /tmp/y`. The `-A` flag is
+  required on this box's OpenSSL 1.1.1k for single-line payloads;
+  verify with `md5` on both ends.

@@ -24,8 +24,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 ALGO_AES_128_CBC = 1
 
 #: salt constants embedded in libncrypto.so .rodata at 0x1b41f / 0x1b40f
-V1_KEY_SALT = bytes.fromhex("212807a5ef00620c4b62f32e0985e30e")
-V1_IV_SALT = bytes.fromhex("00463538798d48c8c0323df3e75109d2")
+V1_KEY_SALT = bytes.fromhex("2807a5ef00620c4b62f32e0985e30e4e")
+V1_IV_SALT = bytes.fromhex("463538798d48c8c0323df3e75109d221")
 
 #: key length actually requested by the backup path (``mov esi, 0x10``)
 KEY_LEN = 16
