@@ -8,7 +8,7 @@
 # Verify integrity afterwards with md5 on both sides (md5 is whitelisted;
 # ls -l works for sizes).
 set -e
-VM=${VM:-admin@the-5.1.4-VM}
+VM=${VM:?set VM=user@host}
 remote=$1
 local=${2:-$(basename "$remote")}
 sshpass -p "${SSHPASS:?set SSHPASS}" ssh -o StrictHostKeyChecking=no \

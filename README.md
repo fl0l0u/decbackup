@@ -7,11 +7,17 @@
 <h4 align="center">Python clone of Stormshield SNS's backup decryption utility, built from a full reverse-engineering of decbackup + libncrypto.so</h4>
 
 <p align="center">
+  <a href="https://pypi.org/project/decbackup/">
+    <img src="https://img.shields.io/pypi/v/decbackup?style=flat-square" alt="PyPI">
+  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License">
   </a>
   <img src="https://img.shields.io/badge/platform-any-lightgrey?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/python-3.9%2B-yellow?style=flat-square" alt="Python">
+  <a href="https://github.com/fl0l0u/decbackup/actions">
+    <img src="https://img.shields.io/github/actions/workflow/status/fl0l0u/decbackup/ci.yml?style=flat-square&label=CI" alt="CI">
+  </a>
 </p>
 
 <p align="center">
@@ -45,8 +51,19 @@ plus an empirical error-code matrix against a live device (see
 ## Installation
 
 ```bash
+pip install decbackup
+```
+
+Or from a checkout:
+
+```bash
 pip install .
 ```
+
+The wheel bundles everything needed at runtime: the package code, the
+four CA certificates extracted from `libncrypto.so` (`decbackup/certs/`),
+and a `decbackup` console script. The only dependency is
+`cryptography`.
 
 ## Usage
 
@@ -107,6 +124,18 @@ legacy/           the earlier single-file iteration (kept for reference)
 ```bash
 python tests/test_decbackup.py        # exit code = number of failures
 python analysis/probes.py             # real-vs-clone error-code parity table
+```
+
+## Releasing
+
+Tagged pushes (`v*`) build an sdist + wheel, smoke-test the wheel against
+the bundled device vectors, and publish to PyPI via trusted publishing
+(see `.github/workflows/release.yml`). Pushes and PRs run lint + the
+error-code parity suite on Python 3.9–3.13
+(`.github/workflows/ci.yml`).
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0   # → PyPI
 ```
 
 ## License

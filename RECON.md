@@ -7,7 +7,7 @@ are file offsets in the extracted binaries (`bin/` on the VM, mirrored under
 
 ## 1. Environment & extraction workflow
 
-* VM at `the-5.1.4-VM`, admin shell is a **restricted csh whitelist**:
+* SNS **v5.1.4** lab VM; admin shell is a **restricted csh whitelist**:
   no `cat`, `od`, `printf`, `for`, no `2>` redirection (csh: `2>&1` =
   "Ambiguous output redirect"). `ls`, `stat`, `sed`, `dd`, `bsdtar`,
   `openssl`, `md5`, `encbackup`, `decbackup` *are* available.
@@ -219,6 +219,12 @@ fetched by base64-over-ssh, and cross-validated against the real
 `decbackup` output. Error vectors are byte-identical to the device-side
 probe files (sha256 listed in `analysis/probes.py` history).
 
+Privacy note: the vectors are real device output and cannot be edited
+without breaking the signature they exercise, so they carry the lab
+device's certificate (public by design) and the default evaluation-VM
+serial; the payload tars are synthetic and the passwords are the test
+values shown below. No private key material is present in any vector.
+
 | vector | payload | password | code |
 |---|---|---|---|
 | test.bkup | test.tar (2 KiB) | `testpass` | 0 |
@@ -226,11 +232,12 @@ probe files (sha256 listed in `analysis/probes.py` history).
 | big.bkup | big.tar | `BigPass789` | 0 |
 | mid.bkup | mid.tar (23 KiB, multi-chunk) | `MidPass321` | 0 |
 | trunc/xzero/ct/cert/mv3/v9 | — | `testpass` | 8/6/7/7/12/7 |
-| v1probe.bkup / v1badkey.bkup | v428.tar (§10) | `testpass` | 7 / 13 |
+| v1probe.bkup / v1badkey.bkup | test.tar (§10, v1-encrypted) | `testpass` | 7 / 13 |
 
-## 10. Second VM: SNS v4.2.8 (the-4.2.8-VM)
+## 10. Second VM: SNS v4.2.8
 
-Older box, same EVA1-VM hardware line, serial `VMSNSX00Z0000A0`, clock
+Older box, same EVA1-VM hardware line, the same default evaluation-VM
+serial as the 5.1.4 box, clock
 pinned to 2020. All four binaries differ from 5.1.4
 (`decbackup fca8df91…`, `libncrypto.so ddca97b1…`). Its `decbackup` usage
 string lacks the `-P` line; `encbackup` still writes **majversion=2**

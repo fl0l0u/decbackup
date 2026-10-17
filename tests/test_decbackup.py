@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Test suite for the decbackup clone, run against the captured vectors in
 tests/vectors/ (produced by encbackup on an SNS 5.1.4 device and validated
-against the real decbinary — see RECON.md for the error-code derivation).
+against the real binary — see RECON.md for the error-code derivation).
 
 Exit code = number of failures.
 """
@@ -11,6 +11,7 @@ import hashlib
 import pathlib
 import subprocess
 import sys
+import tempfile
 import warnings
 
 HERE = pathlib.Path(__file__).parent
@@ -33,8 +34,7 @@ from decbackup.pkcs7 import parse_signed_data  # noqa: E402
 from decbackup.trust import load_trust_store  # noqa: E402
 
 V = ROOT / "tests" / "vectors"
-TMP = pathlib.Path("/tmp/opencode")
-TMP.mkdir(parents=True, exist_ok=True)
+TMP = pathlib.Path(tempfile.mkdtemp(prefix="decbackup-tests-"))
 
 RESULTS = []
 
