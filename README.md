@@ -11,7 +11,7 @@
     <img src="https://img.shields.io/pypi/v/decbackup?style=flat-square" alt="PyPI">
   </a>
   <a href="LICENSE">
-    <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License">
   </a>
   <img src="https://img.shields.io/badge/platform-any-lightgrey?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/python-3.9%2B-yellow?style=flat-square" alt="Python">
@@ -148,7 +148,8 @@ git tag v0.1.0 && git push origin v0.1.0   # → PyPI
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE). The patent grant and
+patent-retaliation clauses of Apache-2.0 apply.
 
 *Stormshield* is a trademark of Stormshield. This project is unaffiliated
 with Stormshield; it exists so that backups you own remain readable.

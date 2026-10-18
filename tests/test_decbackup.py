@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Test suite for the decbackup clone, run against the captured vectors in
 tests/vectors/ (produced by encbackup on an SNS 5.1.4 device and validated
 against the real binary — see RECON.md for the error-code derivation).
