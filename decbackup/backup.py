@@ -122,20 +122,30 @@ def _crypto_datas(fields: dict[str, str], maj_v: int, password: str) -> tuple[by
 
 
 def decrypt_backup(
-    input_path: str | os.PathLike, output_path: str | os.PathLike, password: str = ""
+    input_path: str | os.PathLike,
+    output_path: str | os.PathLike,
+    password: str = "",
+    *,
+    verify: bool = True,
 ) -> dict[str, str]:
-    """Decrypt and verify a backup, mirroring ``decbackup``.
+    """Decrypt and (by default) verify a backup, mirroring ``decbackup``.
 
     Returns the parsed header fields on success; raises :class:`BackupError`
     with the original's numeric code otherwise.  No output file survives a
     failure — the original deletes it on every error path.
+
+    ``verify=False`` is a clone extension (no such option exists on the
+    device): it skips PKCS#7 trailer parsing and chain/signature
+    verification entirely — the trailer length field is still required to
+    locate the payload.  The output is then UNAUTHENTICATED plaintext;
+    successful decryption alone says nothing about origin or integrity.
     """
     out = Path(output_path)
     try:
         # The original fopen()s the output early ("wb", truncating any
         # existing file) and removes it again on every error path.
         out.write_bytes(b"")
-        return _decrypt_backup(input_path, out, password)
+        return _decrypt_backup(input_path, out, password, verify)
     except BackupError:
         with contextlib.suppress(OSError):
             out.unlink(missing_ok=True)
@@ -144,7 +154,7 @@ def decrypt_backup(
         raise BackupError(E_FILE, str(exc)) from exc
 
 
-def _decrypt_backup(input_path, out: Path, password: str) -> dict[str, str]:
+def _decrypt_backup(input_path, out: Path, password: str, verify: bool = True) -> dict[str, str]:
     try:
         data = Path(input_path).read_bytes()
     except OSError as exc:
@@ -180,11 +190,14 @@ def _decrypt_backup(input_path, out: Path, password: str) -> dict[str, str]:
     if maj_v not in (1, 2):
         raise BackupError(E_MAJVERSION, f"Unknown backup majversion: {maj_v}")
 
-    try:
-        certs, signers = pkcs7.parse_signed_data(data[HEADER_LEN + 4 : HEADER_LEN + 4 + sig_len])
-    except pkcs7.SignatureError as exc:
-        # fail closed: unparsable trailer means no verification possible
-        raise BackupError(E_PARSE, str(exc)) from exc
+    if verify:
+        try:
+            certs, signers = pkcs7.parse_signed_data(
+                data[HEADER_LEN + 4 : HEADER_LEN + 4 + sig_len]
+            )
+        except pkcs7.SignatureError as exc:
+            # fail closed: unparsable trailer means no verification possible
+            raise BackupError(E_PARSE, str(exc)) from exc
 
     try:
         key, iv, algo = _crypto_datas(fields, maj_v, password)
@@ -210,12 +223,13 @@ def _decrypt_backup(input_path, out: Path, password: str) -> dict[str, str]:
     except ValueError as exc:
         raise BackupError(E_DECRYPT, f"decrypt failed: {exc}") from exc
 
-    content = block + plaintext
-    try:
-        signer_der = signers[0].verify(certs, content)
-        trust.verify_chain(signer_der, certs)
-    except (pkcs7.SignatureError, trust.ChainError) as exc:
-        raise BackupError(E_VERIFY, f"invalid backup: {exc}") from exc
+    if verify:
+        content = block + plaintext
+        try:
+            signer_der = signers[0].verify(certs, content)
+            trust.verify_chain(signer_der, certs)
+        except (pkcs7.SignatureError, trust.ChainError) as exc:
+            raise BackupError(E_VERIFY, f"invalid backup: {exc}") from exc
 
     try:
         out.write_bytes(plaintext)

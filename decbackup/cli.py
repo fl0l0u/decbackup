@@ -16,6 +16,8 @@ USAGE = (
     "Usage : () -i <backup> -o <output archive>\n"
     "                    [-p <password>] [-d : dump backup header]\n"
     "                    [-P : prompt for password]\n"
+    "                    [--no-verify : skip signature verification"
+    " (clone extension)]\n"
 )
 
 PROMPT = "Enter backup password (<Enter> for none): "
@@ -42,10 +44,13 @@ def main(argv: list[str] | None = None) -> int:
     password: str | None = None
     prompt = False
     dump = False
+    verify = True
     p_count = 0
 
+    # the original getopt string is exactly "Pi:p:o:d"; --no-verify is a
+    # long-option extension, which cannot collide with that grammar
     try:
-        opts, _ = getopt.getopt(argv, "Pi:p:o:d")
+        opts, _ = getopt.getopt(argv, "Pi:p:o:d", ["no-verify"])
     except getopt.GetoptError as exc:
         # match the C library's message shape
         if exc.opt:
@@ -71,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
             output_path = arg
         elif opt == "-d":
             dump = True
+        elif opt == "--no-verify":
+            verify = False
 
     if input_path is None or output_path is None:
         print(USAGE, file=sys.stderr, end="")
@@ -79,8 +86,15 @@ def main(argv: list[str] | None = None) -> int:
     if password is None:
         password = _read_password(prompt)
 
+    if not verify:
+        print(
+            "decbackup: WARNING: signature verification skipped -- "
+            "the output is decrypted but UNAUTHENTICATED",
+            file=sys.stderr,
+        )
+
     try:
-        decrypt_backup(input_path, output_path, password)
+        decrypt_backup(input_path, output_path, password, verify=verify)
     except BackupError as exc:
         print(f"decrypt and/or verify backup failed ({exc.code})", file=sys.stderr)
         return 1

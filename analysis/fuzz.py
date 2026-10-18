@@ -131,7 +131,7 @@ class _Alarm:
         return False
 
 
-def check_container(rng: random.Random, data: bytes, tmp: pathlib.Path):
+def check_container(rng: random.Random, data: bytes, tmp: pathlib.Path, verify: bool = True):
     out = tmp / "fuzz.out"
     try:
         out.unlink(missing_ok=True)
@@ -139,7 +139,7 @@ def check_container(rng: random.Random, data: bytes, tmp: pathlib.Path):
         pass
     try:
         with _Alarm(5):
-            decrypt_backup(_spill(rng, data, tmp), out, "testpass")
+            decrypt_backup(_spill(rng, data, tmp), out, "testpass", verify=verify)
     except Slow:
         raise
     except BackupError as exc:
@@ -198,7 +198,7 @@ def main():
         else:
             data = mutate(rng, rng.choice(corpus))
         try:
-            check_container(rng, data, tmp)
+            check_container(rng, data, tmp, verify=(i % 2 == 0))
             check_parsers(rng, data)
         except Slow:
             slows += 1

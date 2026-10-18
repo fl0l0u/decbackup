@@ -71,6 +71,7 @@ and a `decbackup` console script. The only dependency is
 Usage : () -i <backup> -o <output archive>
                     [-p <password>] [-d : dump backup header]
                     [-P : prompt for password]
+                    [--no-verify : skip signature verification (clone extension)]
 ```
 
 ```bash
@@ -81,6 +82,12 @@ tar tf archive.tar
 Success is silent (exit 0), exactly like the original; failure prints
 `decrypt and/or verify backup failed (%d)` with the appliance's own error
 code. `-d` prints the decoded header block after a successful run.
+
+`--no-verify` has no counterpart on the device: it skips trailer
+parsing and signature/chain checks to rescue backups whose signature
+region is corrupted. It prints a warning and the output is
+**unauthenticated** — decryption alone proves the password was right,
+not that the backup came from a genuine appliance.
 
 Library use:
 

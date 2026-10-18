@@ -147,6 +147,14 @@ Usage : () -i <backup> -o <output archive>
   `decrypt and/or verify backup failed (%d)` (stderr) and exits 1.
 * Output file is created early (`fopen wb`) and **removed on every error
   path**.
+* Clone extension: `--no-verify` (long option only — the original
+  getopt string `Pi:p:o:d` is unchanged and cannot collide with it).
+  It skips trailer parsing and all verification; the X field is still
+  read to locate the payload, so the structural floor (8) and padding
+  errors (13) remain.  A corrupted-but-in-range X can therefore yield
+  exit 0 with garbage content — that is the point of the switch.
+  A warning goes to stderr and exit 0 then means
+  "decrypted, not authenticated".
 
 ## 6. Error codes (empirical matrix, real device vs clone — parity)
 

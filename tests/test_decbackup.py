@@ -189,6 +189,28 @@ check(
     p.returncode == 1 and p.stderr.strip() == "decrypt and/or verify backup failed (13)",
 )
 
+# --- --no-verify (clone extension) ------------------------------------------
+p = cli("-i", str(V / "cert.bkup"), "-o", str(TMP / "nv1.out"), "-p", "testpass", "--no-verify")
+check(
+    "cli: --no-verify rescues cert-tamper",
+    p.returncode == 0
+    and "UNAUTHENTICATED" in p.stderr
+    and (TMP / "nv1.out").read_bytes() == (V / "test.tar").read_bytes(),
+)
+p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "nv2.out"), "-p", "bad", "--no-verify")
+check(
+    "cli: --no-verify still needs the password",
+    p.returncode == 1 and "failed (13)" in p.stderr,
+)
+p = cli("-i", str(V / "trunc.bkup"), "-o", str(TMP / "nv3.out"), "-p", "testpass", "--no-verify")
+check("cli: --no-verify keeps structural floor", p.returncode == 1 and "failed (8)" in p.stderr)
+try:
+    decrypt_backup(V / "cert.bkup", TMP / "nv4.out", "testpass", verify=False)
+    ok = (TMP / "nv4.out").read_bytes() == (V / "test.tar").read_bytes()
+except BackupError:
+    ok = False
+check("lib: verify=False kwarg", ok)
+
 fails = sum(1 for _, ok in RESULTS if not ok)
 print(f"\n{len(RESULTS) - fails}/{len(RESULTS)} checks passed")
 sys.exit(fails)
