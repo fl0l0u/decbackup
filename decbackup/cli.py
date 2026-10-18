@@ -61,8 +61,8 @@ def main(argv: list[str] | None = None) -> int:
         elif opt == "-p":
             p_count += 1
             if p_count > 1:
+                # device-verified: message only, no usage dump
                 print("-p can only be specified once", file=sys.stderr)
-                print(USAGE, file=sys.stderr, end="")
                 return 1
             password = arg
         elif opt == "-i":
@@ -82,8 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         decrypt_backup(input_path, output_path, password)
     except BackupError as exc:
-        print(f"decrypt and/or verify backup failed ({exc.code})",
-              file=sys.stderr)
+        print(f"decrypt and/or verify backup failed ({exc.code})", file=sys.stderr)
         return 1
 
     if dump:

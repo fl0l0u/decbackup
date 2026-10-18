@@ -17,6 +17,7 @@ Recovered from ``libncrypto.so`` (``VerifyMajSignatureInit`` /
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -29,9 +30,10 @@ OID_PKCS7_DATA = "1.2.840.113549.1.7.1"
 OID_CONTENT_TYPE = "1.2.840.113549.1.9.3"
 OID_MESSAGE_DIGEST = "1.2.840.113549.1.9.4"
 
-_HASHES = {
+#: digestAlgorithm OIDs (hash algorithms only; rsaEncryption's hash comes
+#: from this field, per _SIG_ALGS below)
+_HASHES: dict[str, Callable[[], hashes.HashAlgorithm]] = {
     "1.2.840.113549.1.1.14": hashes.SHA224,
-    "1.2.840.113549.1.1.12": hashes.SHA256,
     "2.16.840.1.101.3.4.2.1": hashes.SHA256,
     "2.16.840.1.101.3.4.2.2": hashes.SHA384,
     "2.16.840.1.101.3.4.2.3": hashes.SHA512,
@@ -62,7 +64,7 @@ class SignerInfo:
         fields = list(children(buf, start, end))
         if len(fields) < 6:
             raise SignatureError("truncated SignerInfo")
-        self.version = int.from_bytes(buf[fields[0][1]:fields[0][3]], "big")
+        self.version = int.from_bytes(buf[fields[0][1] : fields[0][3]], "big")
         self.sid = fields[1]
         self.digest_alg = oid_str(buf, *_oid_span(buf, fields[2]))
         # fields[3] is [0] authenticatedAttributes, fields[4] the signature
@@ -73,19 +75,19 @@ class SignerInfo:
             raise SignatureError("authenticatedAttributes missing")
         # PKCS#7 signs the attributes as a SET OF.  Stormshield stores them
         # bare under the [0] tag; a standard encoder nests a SET inside.
-        value = buf[attrs[1]:attrs[3]]
+        value = buf[attrs[1] : attrs[3]]
         if value and value[0] == 0x31:
             self.attrs_der = value
         else:
             self.attrs_der = b"\x31" + encode_len(len(value)) + value
-        self.signature = buf[fields[5][1]:fields[5][3]]
+        self.signature = buf[fields[5][1] : fields[5][3]]
         self._attributes(buf, attrs)
         self._sid(buf, self.sid)
 
     def _attributes(self, buf: bytes, attrs) -> None:
         self.content_type: str | None = None
         self.message_digest: bytes | None = None
-        inner = buf[attrs[1]:attrs[3]]
+        inner = buf[attrs[1] : attrs[3]]
         start, end = 0, len(inner)
         if inner and inner[0] == 0x31:  # SET wrapper present
             _, start, _, end = read_tlv(inner, 0)
@@ -96,13 +98,13 @@ class SignerInfo:
             oid = oid_str(inner, vals[0][1], vals[0][3])
             # vals[1] is the SET OF holding the actual value TLV
             try:
-                value = list(children(inner, vals[1][1], vals[1][3]))[0]
-            except (DERError, IndexError):
-                continue  # noqa: B904
+                value = next(iter(children(inner, vals[1][1], vals[1][3])))
+            except (DERError, StopIteration):
+                continue
             if oid == OID_CONTENT_TYPE:
                 self.content_type = oid_str(inner, value[1], value[3])
             elif oid == OID_MESSAGE_DIGEST:
-                self.message_digest = inner[value[1]:value[3]]
+                self.message_digest = inner[value[1] : value[3]]
 
     def _sid(self, buf: bytes, sid) -> None:
         """Extract issuer DER bytes + serial (issuerAndSerialNumber form)."""
@@ -111,9 +113,8 @@ class SignerInfo:
         inner = list(children(buf, sid[1], sid[3]))
         if len(inner) == 2:
             # the issuer Name TLV starts right at the SID value start
-            self.sid_issuer_der = buf[sid[1]:inner[0][3]]
-            self.sid_serial = int.from_bytes(buf[inner[1][1]:inner[1][3]],
-                                             "big", signed=False)
+            self.sid_issuer_der = buf[sid[1] : inner[0][3]]
+            self.sid_serial = int.from_bytes(buf[inner[1][1] : inner[1][3]], "big", signed=False)
 
     def find_signer_cert(self, certs: list[bytes]) -> bytes:
         """Pick the certificate the SID designates.
@@ -124,7 +125,10 @@ class SignerInfo:
         for der in certs:
             if self.sid_serial is None:
                 continue
-            cert = x509.load_der_x509_certificate(der)
+            try:
+                cert = x509.load_der_x509_certificate(der)
+            except ValueError as exc:
+                raise SignatureError(f"unparsable certificate: {exc}") from exc
             if cert.serial_number == self.sid_serial:
                 return der
         if len(certs) == 1:  # no usable SID match; single candidate
@@ -143,13 +147,14 @@ class SignerInfo:
             raise SignatureError("missing messageDigest attribute")
         hasher = _HASHES.get(self.digest_alg)
         if hasher is None:
-            raise SignatureError(
-                f"unsupported digest algorithm {self.digest_alg}")
+            raise SignatureError(f"unsupported digest algorithm {self.digest_alg}")
         if hashlib.new(hasher().name, content).digest() != self.message_digest:
             raise SignatureError("messageDigest mismatch")
-        cert = x509.load_der_x509_certificate(signer_der)
-        _verify(cert.public_key(), self.signature, self.attrs_der,
-                self.sig_alg, hasher)
+        try:
+            cert = x509.load_der_x509_certificate(signer_der)
+        except ValueError as exc:
+            raise SignatureError(f"unparsable signer certificate: {exc}") from exc
+        _verify(cert.public_key(), self.signature, self.attrs_der, self.sig_alg, hasher)
         return signer_der
 
 
@@ -166,10 +171,12 @@ def _verify(pubkey, signature: bytes, signed: bytes, sig_alg: str, hasher):
         if kind == "rsa":
             pubkey.verify(signature, signed, padding.PKCS1v15(), hasher())
         elif kind == "rsa-pss":
-            pubkey.verify(signature, signed,
-                          padding.PSS(mgf=padding.MGF1(hasher()),
-                                      salt_length=padding.PSS.MAX_LENGTH),
-                          hasher())
+            pubkey.verify(
+                signature,
+                signed,
+                padding.PSS(mgf=padding.MGF1(hasher()), salt_length=padding.PSS.MAX_LENGTH),
+                hasher(),
+            )
         else:  # ecdsa
             pubkey.verify(signature, signed, ec.ECDSA(hasher()))
     except SignatureError:
@@ -186,33 +193,35 @@ def parse_signed_data(sig_der: bytes):
     structural problem (original fail-closed behaviour, error code 6).
     """
     try:
-        tag, vs, ln, ni = read_tlv(sig_der, 0)
+        _tag, vs, _ln, ni = read_tlv(sig_der, 0)
         content_info = list(children(sig_der, vs, ni))
-        if oid_str(sig_der, content_info[0][1],
-                   content_info[0][3]) != OID_SIGNED_DATA:
+        if oid_str(sig_der, content_info[0][1], content_info[0][3]) != OID_SIGNED_DATA:
             raise SignatureError("trailer is not a SignedData")
         sd = content_info[1]  # [0] EXPLICIT SignedData
         inner = read_tlv(sig_der, sd[1])  # the SignedData SEQUENCE itself
         fields = list(children(sig_der, inner[1], inner[3]))
-    except (DERError, IndexError) as exc:
-        raise SignatureError(f"cannot parse PKCS#7 trailer: {exc}") from exc
 
-    certs: list[bytes] = []
-    signers: list[SignerInfo] = []
-    # SignedData field order is fixed: version, digestAlgorithms,
-    # encapContentInfo, [certificates], [crls], signerInfos (last).
-    for f in fields:
-        if f[0] == 0xA0:  # certificates [0] — cert SEQUENCEs stored bare
-            i = f[1]
-            while i < f[3]:
-                t, vs, ln, ni = read_tlv(sig_der, i)
-                if t != 0x30:
-                    break
-                certs.append(sig_der[i:ni])
-                i = ni
-    if fields and fields[-1][0] in (0x30, 0x31):
-        for si in children(sig_der, fields[-1][1], fields[-1][3]):
-            signers.append(SignerInfo(sig_der, si[1], si[3]))
-    if not signers:
-        raise SignatureError("SignedData has no signerInfos")
-    return certs, signers
+        certs: list[bytes] = []
+        signers: list[SignerInfo] = []
+        # SignedData field order is fixed: version, digestAlgorithms,
+        # encapContentInfo, [certificates], [crls], signerInfos (last).
+        for f in fields:
+            if f[0] == 0xA0:  # certificates [0] — cert SEQUENCEs stored bare
+                i = f[1]
+                while i < f[3]:
+                    t, _vs, _l2, ni2 = read_tlv(sig_der, i)
+                    if t != 0x30:
+                        break
+                    certs.append(sig_der[i:ni2])
+                    i = ni2
+        if fields and fields[-1][0] in (0x30, 0x31):
+            for si in children(sig_der, fields[-1][1], fields[-1][3]):
+                signers.append(SignerInfo(sig_der, si[1], si[3]))
+        if not signers:
+            raise SignatureError("SignedData has no signerInfos")
+        return certs, signers
+    except SignatureError:
+        raise
+    except (DERError, ValueError, IndexError, StopIteration) as exc:
+        # the whole trailer walk must fail closed into error code 6
+        raise SignatureError(f"cannot parse PKCS#7 trailer: {exc}") from exc

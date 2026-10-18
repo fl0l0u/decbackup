@@ -168,6 +168,22 @@ commands were silent no-ops). With surgical `dd conv=notrunc` patches the
 tool fails closed on every corrupted byte in the ciphertext, signature,
 attributes, or certificate regions.
 
+### Boundary probes (device, all derived from `test.bkup`)
+
+| probe | edit | code | conclusion |
+|---|---|---|---|
+| yt.bkup | +16 zero bytes appended | 13 | decryption is bounded by **filesize**, not the be32 Y field — Y is informational; trailing garbage lands in the last CBC block → padding fails |
+| ys.bkup | last 16 bytes removed | 13 | a file shorter than Y simply decrypts short (no separate Y error) |
+| mvx.bkup | `majversion=x` (same length) | 13 | non-numeric majversion → parse fails → **defaults to 1** (v1 path) like an absent key; "anything else → 12" applies to parsed numbers only |
+
+### CLI probes (device)
+
+| invocation | stderr |
+|---|---|
+| `decbackup -z` | `decbackup: illegal option -- z` + usage |
+| `-p a -p b …` | `-p can only be specified once` — **no usage dump** |
+| missing `-i`/`-o` | usage only |
+
 ### The version gate (`fwcrypto_maj_get_version`, 0x11820)
 
 `cmp ax,1 → error 12 ("Invalid archive")` at 0x13194 on the flags&2 backup
@@ -211,6 +227,19 @@ untested. Real backups always carry dotted versions → always pass.
 * Error code when the *output* file can't be created: assumed 1.
 * `pbkdf_iterations` default when the key is missing: assumed 1
   (`mov esi, 1` near the getter); real files always carry the key.
+* A crafted `pbkdf_iterations` of ~10^9 stalls verification for minutes
+  on the clone AND on the device (the value is trusted straight from the
+  header) — DoS-by-input is a shared property, not a clone deviation.
+
+## 7b. Robustness contract (fuzzing)
+
+`analysis/fuzz.py` mutation-fuzzes container bytes and the PKCS#7/DER
+parsers against the contract: **any** input must end in a `BackupError`
+with a documented code, never a traceback, never a surviving output
+file, never a hang (5 s guard). Seeds are the real vectors; mutations
+cover bit flips, splices, truncations, X/Y field corruption and random
+files with plausible headers. Campaigns of 60k+ iterations across seeds
+have run clean; re-run before every release.
 
 ## 9. Test vectors (`tests/vectors/`)
 

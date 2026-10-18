@@ -74,6 +74,13 @@ run("cert-tamper", "cert.bkup", None, "testpass", code=7)
 run("majversion3", "mv3.bkup", None, "testpass", code=12)
 run("version-padded-9", "v9.bkup", None, "testpass", code=7)
 
+# boundary probes, device-validated on the 5.1.4 VM (RECON section 6):
+# decryption is filesize-bounded (Y ignored) and non-numeric majversion
+# defaults to the v1 path
+run("tail-bytes", "yt.bkup", None, "testpass", code=13)
+run("short-of-Y", "ys.bkup", None, "testpass", code=13)
+run("majversion-nonnumeric", "mvx.bkup", None, "testpass", code=13)
+
 # v1 probes: same-length majversion 2->1 edit of a real v4.2.8 backup with
 # a copied (valid) trailer; content re-encrypted under the v1 KDF. Correct
 # v1 key -> decrypts, digest check fails (7) exactly as on both devices;
@@ -90,8 +97,7 @@ check("header: quoted date", fields.get("date", "").startswith("20"))
 check("header: no NUL", "\x00" not in text)
 
 # --- crypto ----------------------------------------------------------------
-key = derive_key_v2(b"testpass", bytes.fromhex(fields["salt"]),
-                    int(fields["pbkdf_iterations"]))
+key = derive_key_v2(b"testpass", bytes.fromhex(fields["salt"]), int(fields["pbkdf_iterations"]))
 check("v2 KDF: 16-byte key", len(key) == 16)
 k1, iv1, algo = _crypto_datas(fields, 2, "testpass")
 check("v2 dispatch matches direct PBKDF2", k1 == key and algo == 1)
@@ -99,77 +105,83 @@ check("v2 iv", iv1 == bytes.fromhex(fields["iv"]))
 
 # v1: SHA1(salt || password)[:16] — empirically confirmed on v4.2.8 and
 # v5.1.4 device binaries (v1 probe matrix: correct salt -> 7, shifted -> 13)
-check("v1 key salt", V1_KEY_SALT ==
-      bytes.fromhex("2807a5ef00620c4b62f32e0985e30e4e"))
-check("v1 iv salt", V1_IV_SALT ==
-      bytes.fromhex("463538798d48c8c0323df3e75109d221"))
-check("v1 key", derive_key_v1(b"x") ==
-      hashlib.sha1(V1_KEY_SALT + b"x").digest()[:16])
-check("v1 iv", derive_iv_v1(b"x") ==
-      hashlib.sha1(V1_IV_SALT + b"x").digest()[:16])
+check("v1 key salt", V1_KEY_SALT == bytes.fromhex("2807a5ef00620c4b62f32e0985e30e4e"))
+check("v1 iv salt", V1_IV_SALT == bytes.fromhex("463538798d48c8c0323df3e75109d221"))
+check("v1 key", derive_key_v1(b"x") == hashlib.sha1(V1_KEY_SALT + b"x").digest()[:16])
+check("v1 iv", derive_iv_v1(b"x") == hashlib.sha1(V1_IV_SALT + b"x").digest()[:16])
 big = _sha1_salted(V1_KEY_SALT, b"x", 32)
-check("v1 fill progression", big[20:] == bytes(
-    (32 - 1 + (32 - i) * 0xEB) & 0xFF for i in range(20, 32)))
+check(
+    "v1 fill progression",
+    big[20:] == bytes((32 - 1 + (32 - i) * 0xEB) & 0xFF for i in range(20, 32)),
+)
 
 # --- PKCS#7 ----------------------------------------------------------------
 data = (V / "test.bkup").read_bytes()
 X = int.from_bytes(data[0x400:0x404], "big")
-certs, signers = parse_signed_data(data[0x404:0x404 + X])
+certs, signers = parse_signed_data(data[0x404 : 0x404 + X])
 check("p7: two certificates", len(certs) == 2)
 si = signers[0]
-check("p7: sig alg rsa", si.sig_alg in ("1.2.840.113549.1.1.1",
-                                        "1.2.840.113549.1.1.11"))
+check("p7: sig alg rsa", si.sig_alg in ("1.2.840.113549.1.1.1", "1.2.840.113549.1.1.11"))
 check("p7: contentType data", si.content_type == "1.2.840.113549.1.7.1")
 check("p7: attrs DER starts with SET", si.attrs_der[0] == 0x31)
 leaf = x509.load_der_x509_certificate(certs[0])
-check("p7: leaf has backup policy", any(
-    p.policy_identifier.dotted_string == "1.3.6.1.4.1.11256.2.3"
-    for p in leaf.extensions.get_extension_for_class(
-        x509.CertificatePolicies).value))
+check(
+    "p7: leaf has backup policy",
+    any(
+        p.policy_identifier.dotted_string == "1.3.6.1.4.1.11256.2.3"
+        for p in leaf.extensions.get_extension_for_class(x509.CertificatePolicies).value
+    ),
+)
 plaintext = (TMP / "test.out").read_bytes()
-check("p7: messageDigest == sha256(header+payload)",
-      si.message_digest == hashlib.sha256(data[:0x400] + plaintext).digest())
+check(
+    "p7: messageDigest == sha256(header+payload)",
+    si.message_digest == hashlib.sha256(data[:0x400] + plaintext).digest(),
+)
 
 # --- trust store -----------------------------------------------------------
 store = load_trust_store()
 check("trust: four embedded CAs", len(store) == 4)
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")  # NETASQ CA: non-positive serial
-    subs = [x509.load_der_x509_certificate(d).subject.rfc4514_string()
-            for d in store]
-check("trust: stormshield roots present",
-      sum("Stormshield" in s for s in subs) == 3
-      and sum("NETASQ" in s for s in subs) == 1)
+    subs = [x509.load_der_x509_certificate(d).subject.rfc4514_string() for d in store]
+check(
+    "trust: stormshield roots present",
+    sum("Stormshield" in s for s in subs) == 3 and sum("NETASQ" in s for s in subs) == 1,
+)
 
 # --- CLI -------------------------------------------------------------------
 PY = sys.executable
 
 
 def cli(*args, expect_rc=0):
-    p = subprocess.run([PY, "-m", "decbackup", *args], capture_output=True,
-                       text=True, cwd=ROOT)
+    p = subprocess.run([PY, "-m", "decbackup", *args], capture_output=True, text=True, cwd=ROOT)
     return p
 
 
-p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "cli.out"),
-        "-p", "testpass")
-check("cli: silent success", p.returncode == 0 and not p.stdout
-      and not p.stderr)
+p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "cli.out"), "-p", "testpass")
+check("cli: silent success", p.returncode == 0 and not p.stdout and not p.stderr)
 p = cli()
-check("cli: usage without args", p.returncode == 1
-      and "Usage : () -i <backup> -o <output archive>" in p.stderr)
-p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "cli2.out"),
-        "-p", "a", "-p", "b")
-check("cli: -p once", p.returncode == 1
-      and "-p can only be specified once" in p.stderr)
-p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "cli3.out"),
-        "-p", "testpass", "-d")
-check("cli: -d dumps header", p.returncode == 0
-      and p.stdout.startswith("Header :\n[BACKUP]\n"))
-p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "cli4.out"),
-        "-p", "bad")
-check("cli: failure message", p.returncode == 1
-      and p.stderr.strip() == "decrypt and/or verify backup failed (13)")
+check(
+    "cli: usage without args",
+    p.returncode == 1 and "Usage : () -i <backup> -o <output archive>" in p.stderr,
+)
+p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "cli2.out"), "-p", "a", "-p", "b")
+check(
+    "cli: -p once",
+    p.returncode == 1 and "-p can only be specified once" in p.stderr and "Usage" not in p.stderr,
+)  # device prints no usage here
+p = cli("-z")
+check(
+    "cli: illegal option",
+    p.returncode == 1 and "illegal option -- z" in p.stderr and "Usage" in p.stderr,
+)
+p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "cli3.out"), "-p", "testpass", "-d")
+check("cli: -d dumps header", p.returncode == 0 and p.stdout.startswith("Header :\n[BACKUP]\n"))
+p = cli("-i", str(V / "test.bkup"), "-o", str(TMP / "cli4.out"), "-p", "bad")
+check(
+    "cli: failure message",
+    p.returncode == 1 and p.stderr.strip() == "decrypt and/or verify backup failed (13)",
+)
 
 fails = sum(1 for _, ok in RESULTS if not ok)
 print(f"\n{len(RESULTS) - fails}/{len(RESULTS)} checks passed")

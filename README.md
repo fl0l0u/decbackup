@@ -124,6 +124,7 @@ legacy/           the earlier single-file iteration (kept for reference)
 ```bash
 python tests/test_decbackup.py        # exit code = number of failures
 python analysis/probes.py             # real-vs-clone error-code parity table
+python analysis/fuzz.py 30000         # robustness contract fuzzer
 ```
 
 ## Releasing

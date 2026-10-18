@@ -4,6 +4,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,6 +27,12 @@ jobs:
           .venv-smoke/bin/decbackup -i tests/vectors/test.bkup \
               -o archive.tar -p testpass
           tar tf archive.tar > /dev/null
+          # failure contract: wrong password must exit 1 and leave no file
+          if .venv-smoke/bin/decbackup -i tests/vectors/test.bkup \
+              -o /tmp/bad.out -p wrong; then
+            echo "expected failure with wrong password" >&2; exit 1
+          fi
+          test ! -e /tmp/bad.out
       - uses: actions/upload-artifact@v4
         with:
           name: dist

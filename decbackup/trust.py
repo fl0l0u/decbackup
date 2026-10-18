@@ -12,6 +12,8 @@ build a signature-valid chain to one of the embedded roots, ignore dates.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
+from functools import lru_cache
 from importlib import resources
 
 from cryptography import x509
@@ -25,14 +27,14 @@ EXT_CERTIFICATE_POLICIES = "2.5.29.32"
 
 _MAX_DEPTH = 8
 
-_RSA_HASHES = {
+_RSA_HASHES: dict[str, Callable[[], hashes.HashAlgorithm]] = {
     "1.2.840.113549.1.1.5": hashes.MD5,
     "1.2.840.113549.1.1.11": hashes.SHA256,
     "1.2.840.113549.1.1.12": hashes.SHA384,
     "1.2.840.113549.1.1.13": hashes.SHA512,
 }
 
-_ECDSA_HASHES = {
+_ECDSA_HASHES: dict[str, Callable[[], hashes.HashAlgorithm]] = {
     "1.2.840.10045.4.3.2": hashes.SHA256,
     "1.2.840.10045.4.3.3": hashes.SHA384,
     "1.2.840.10045.4.3.4": hashes.SHA512,
@@ -46,19 +48,36 @@ class ChainError(Exception):
 def load_trust_store() -> list[bytes]:
     """DER blobs of the four CA certificates embedded in libncrypto."""
     store = resources.files(__package__).joinpath("certs")
-    names = ("stormshield-sns-enrollment-products-ca.der",
-             "netasq-firewall-ca.der",
-             "stormshield-products-root-ca.der",
-             "stormshield-product-and-services-root-ca.der")
+    names = (
+        "stormshield-sns-enrollment-products-ca.der",
+        "netasq-firewall-ca.der",
+        "stormshield-products-root-ca.der",
+        "stormshield-product-and-services-root-ca.der",
+    )
     with warnings.catch_warnings():
         # the NETASQ CA carries a non-positive serial (RFC 5280 violation
-        # in the real device firmware); the original tool loads it fine.
+        # in the real CA); the original tool loads it fine.
         warnings.simplefilter("ignore")
         return [store.joinpath(n).read_bytes() for n in names]
 
 
-def _verify_cert_signature(cert: x509.Certificate,
-                           issuer: x509.Certificate) -> None:
+@lru_cache(maxsize=1)
+def _netasq_subject_der() -> bytes:
+    der = (
+        resources.files(__package__)
+        .joinpath("certs")
+        .joinpath("netasq-firewall-ca.der")
+        .read_bytes()
+    )
+    return _load_cert(der).subject.public_bytes()
+
+
+def _netasq_issued(cert: x509.Certificate) -> bool:
+    """``fw_libcrypto_is_netasq_issued``: DER memcmp of the issuer Name."""
+    return cert.issuer.public_bytes() == _netasq_subject_der()
+
+
+def _verify_cert_signature(cert: x509.Certificate, issuer: x509.Certificate) -> None:
     """Check *cert*'s signature against *issuer*'s public key."""
     sig, tbs = cert.signature, cert.tbs_certificate_bytes
     alg = cert.signature_algorithm_oid.dotted_string
@@ -66,16 +85,18 @@ def _verify_cert_signature(cert: x509.Certificate,
     try:
         if isinstance(key, rsa.RSAPublicKey):
             if alg == "1.2.840.113549.1.1.10":  # rsassa-pss
-                key.verify(sig, tbs,
-                           padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
-                                       salt_length=padding.PSS.MAX_LENGTH),
-                           hashes.SHA256())
+                key.verify(
+                    sig,
+                    tbs,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH
+                    ),
+                    hashes.SHA256(),
+                )
             else:
-                key.verify(sig, tbs, padding.PKCS1v15(),
-                           _RSA_HASHES.get(alg, hashes.SHA256)())
+                key.verify(sig, tbs, padding.PKCS1v15(), _RSA_HASHES.get(alg, hashes.SHA256)())
         elif isinstance(key, ec.EllipticCurvePublicKey):
-            key.verify(sig, tbs,
-                       ec.ECDSA(_ECDSA_HASHES.get(alg, hashes.SHA256)()))
+            key.verify(sig, tbs, ec.ECDSA(_ECDSA_HASHES.get(alg, hashes.SHA256)()))
         else:
             raise ChainError(f"unsupported issuer key type: {type(key)}")
     except ChainError:
@@ -87,7 +108,10 @@ def _verify_cert_signature(cert: x509.Certificate,
 def _load_cert(der: bytes) -> x509.Certificate:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return x509.load_der_x509_certificate(der)
+        try:
+            return x509.load_der_x509_certificate(der)
+        except ValueError as exc:
+            raise ChainError(f"unparsable certificate: {exc}") from exc
 
 
 def verify_chain(leaf_der: bytes, untrusted: list[bytes]) -> list[bytes]:
@@ -103,41 +127,43 @@ def verify_chain(leaf_der: bytes, untrusted: list[bytes]) -> list[bytes]:
     others = [_load_cert(der) for der in untrusted]
 
     leaf = _load_cert(leaf_der)
-    _check_policy(leaf)
+    try:
+        _check_policy(leaf)
+    except ChainError:
+        # the verify callback accepts error 43 (no matching policy) only
+        # for NETASQ-issued certs (fw_libcrypto_is_netasq_issued)
+        if not _netasq_issued(leaf):
+            raise
 
     chain = [leaf_der]
     cur = leaf
     for _ in range(_MAX_DEPTH):
         if cur.issuer == cur.subject:  # self-signed: must be an anchor
             for anchor in trusted_certs:
-                if (anchor.subject == cur.subject
-                        and anchor.serial_number == cur.serial_number):
+                if anchor.subject == cur.subject and anchor.serial_number == cur.serial_number:
                     _verify_cert_signature(cur, cur)
                     return chain
             raise ChainError("self-signed certificate is not trusted")
-        nxt = nxt_der = None
+        found: tuple[x509.Certificate, bytes] | None = None
         for der, cand in zip(untrusted + trusted, others + trusted_certs):
             if cand.subject == cur.issuer:
                 try:
                     _verify_cert_signature(cur, cand)
                 except ChainError:
                     continue
-                nxt, nxt_der = cand, der
+                found = (cand, der)
                 break
-        if nxt is None:
-            raise ChainError(
-                f"unable to get issuer certificate: "
-                f"{cur.issuer.rfc4514_string()}")
-        chain.append(nxt_der)
-        cur = nxt
+        if found is None:
+            raise ChainError(f"unable to get issuer certificate: {cur.issuer.rfc4514_string()}")
+        cur, der = found
+        chain.append(der)
     raise ChainError("maximum chain depth exceeded")
 
 
 def _check_policy(cert: x509.Certificate) -> None:
     """The verify parameters require the Stormshield backup policy OID."""
     try:
-        ext = cert.extensions.get_extension_for_class(
-            x509.CertificatePolicies).value
+        ext = cert.extensions.get_extension_for_class(x509.CertificatePolicies).value
     except x509.ExtensionNotFound:
         return  # no policy extension: unconstrained, OpenSSL accepts it
     try:

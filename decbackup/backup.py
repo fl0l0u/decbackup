@@ -26,6 +26,7 @@ empirical derivation of each.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from pathlib import Path
@@ -37,13 +38,13 @@ CHUNK_LEN = 0x4000
 
 # Error codes as reported by the original tool.
 E_OK = 0
-E_FILE = 1          # input/output could not be opened
-E_PARSE = 6         # signature trailer / crypto parameters unparsable
-E_VERIFY = 7        # signature, chain or content digest verification failed
-E_HEADER = 8        # file shorter than the 0x400 header block
-E_MAJVERSION = 12   # unknown backup majversion / "Invalid archive"
-E_DECRYPT = 13      # decryption failed (in practice: wrong password)
-E_ALGO = 32         # unsupported cipher algorithm
+E_FILE = 1  # input/output could not be opened
+E_PARSE = 6  # signature trailer / crypto parameters unparsable
+E_VERIFY = 7  # signature, chain or content digest verification failed
+E_HEADER = 8  # file shorter than the 0x400 header block
+E_MAJVERSION = 12  # unknown backup majversion / "Invalid archive"
+E_DECRYPT = 13  # decryption failed (in practice: wrong password)
+E_ALGO = 32  # unsupported cipher algorithm
 
 _INT_RE = re.compile(r"[0-9]{1,4}\Z")
 
@@ -77,10 +78,10 @@ def parse_header(block: bytes) -> tuple[str, dict[str, str]]:
 
 
 def _be32(buf: bytes, off: int) -> int:
-    return int.from_bytes(buf[off:off + 4], "big")
+    return int.from_bytes(buf[off : off + 4], "big")
 
 
-def _version_ok(value: str) -> bool:
+def _version_ok(value: str | None) -> bool:
     """The original gate at 0x1318e (``Invalid archive``).
 
     ``fwcrypto_maj_get_version`` runs the parsed value through
@@ -96,8 +97,7 @@ def _version_ok(value: str) -> bool:
     return m is None or int(m.group()) == 1
 
 
-def _crypto_datas(fields: dict[str, str], maj_v: int,
-                  password: str) -> tuple[bytes, bytes, int]:
+def _crypto_datas(fields: dict[str, str], maj_v: int, password: str) -> tuple[bytes, bytes, int]:
     """``fwcrypto_get_backup_crypto_datas`` + key derivation."""
     algo = int(fields["algo"]) if fields.get("algo", "").isdigit() else None
     if maj_v == 2:
@@ -121,12 +121,10 @@ def _crypto_datas(fields: dict[str, str], maj_v: int,
     return key, iv, algo
 
 
-def decrypt_backup(input_path: str | os.PathLike,
-                   output_path: str | os.PathLike,
-                   password: str = "",
-                   *,
-                   verify: bool = True) -> dict[str, str]:
-    """Decrypt (and by default verify) a backup, mirroring ``decbackup``.
+def decrypt_backup(
+    input_path: str | os.PathLike, output_path: str | os.PathLike, password: str = ""
+) -> dict[str, str]:
+    """Decrypt and verify a backup, mirroring ``decbackup``.
 
     Returns the parsed header fields on success; raises :class:`BackupError`
     with the original's numeric code otherwise.  No output file survives a
@@ -137,19 +135,16 @@ def decrypt_backup(input_path: str | os.PathLike,
         # The original fopen()s the output early ("wb", truncating any
         # existing file) and removes it again on every error path.
         out.write_bytes(b"")
-        return _decrypt_backup(input_path, out, password, verify)
+        return _decrypt_backup(input_path, out, password)
     except BackupError:
-        try:
+        with contextlib.suppress(OSError):
             out.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
     except OSError as exc:
         raise BackupError(E_FILE, str(exc)) from exc
 
 
-def _decrypt_backup(input_path, out: Path, password: str,
-                    verify: bool) -> dict[str, str]:
+def _decrypt_backup(input_path, out: Path, password: str) -> dict[str, str]:
     try:
         data = Path(input_path).read_bytes()
     except OSError as exc:
@@ -158,6 +153,14 @@ def _decrypt_backup(input_path, out: Path, password: str,
     if len(data) < HEADER_LEN:
         raise BackupError(E_HEADER, "file shorter than backup header")
 
+    block = data[:HEADER_LEN]
+    _text, fields = parse_header(block)
+
+    # Empirically the version gate fires before the trailer-fit check:
+    # a length-shifted file with a bad version yields 12, not 6 (§6).
+    if not _version_ok(fields.get("version")):
+        raise BackupError(E_MAJVERSION, "Invalid archive")
+
     # The signature trailer must fit in the first 0x4000-byte chunk the
     # original reads; otherwise verification can never run and the file
     # is rejected fail-closed (fwcrypto_upd_get_signature failed).
@@ -165,12 +168,6 @@ def _decrypt_backup(input_path, out: Path, password: str,
     sig_len = _be32(data, HEADER_LEN)
     if sig_len + HEADER_LEN + 4 >= first_len:
         raise BackupError(E_PARSE, "fwcrypto_upd_get_signature failed")
-
-    block = data[:HEADER_LEN]
-    text, fields = parse_header(block)
-
-    if not _version_ok(fields.get("version")):
-        raise BackupError(E_MAJVERSION, "Invalid archive")
 
     # fwcrypto_get_backup_majversion: defaults to 1 when the key is absent.
     maj = fields.get("majversion")
@@ -184,8 +181,7 @@ def _decrypt_backup(input_path, out: Path, password: str,
         raise BackupError(E_MAJVERSION, f"Unknown backup majversion: {maj_v}")
 
     try:
-        certs, signers = pkcs7.parse_signed_data(
-            data[HEADER_LEN + 4:HEADER_LEN + 4 + sig_len])
+        certs, signers = pkcs7.parse_signed_data(data[HEADER_LEN + 4 : HEADER_LEN + 4 + sig_len])
     except pkcs7.SignatureError as exc:
         # fail closed: unparsable trailer means no verification possible
         raise BackupError(E_PARSE, str(exc)) from exc
@@ -203,23 +199,23 @@ def _decrypt_backup(input_path, out: Path, password: str,
     off = HEADER_LEN + 4 + sig_len + 4
     if off >= len(data):
         raise BackupError(E_PARSE, "fwcrypto_upd_get_data_size failed")
+    # The device decrypts filesize - off bytes and ignores the be32 Y
+    # field (device probes: +16 trailing bytes -> 13; 16 bytes short -> 13).
     ciphertext = data[off:]
     if len(ciphertext) % 16:
         raise BackupError(E_DECRYPT, "EVP_CipherFinal (maj) failed")
 
     try:
-        plaintext = crypto.pkcs7_unpad(crypto.aes_cbc_decrypt(key, iv,
-                                                              ciphertext))
+        plaintext = crypto.pkcs7_unpad(crypto.aes_cbc_decrypt(key, iv, ciphertext))
     except ValueError as exc:
         raise BackupError(E_DECRYPT, f"decrypt failed: {exc}") from exc
 
-    if verify:
-        content = block + plaintext
-        try:
-            signer_der = signers[0].verify(certs, content)
-            trust.verify_chain(signer_der, certs)
-        except (pkcs7.SignatureError, trust.ChainError) as exc:
-            raise BackupError(E_VERIFY, f"invalid backup: {exc}") from exc
+    content = block + plaintext
+    try:
+        signer_der = signers[0].verify(certs, content)
+        trust.verify_chain(signer_der, certs)
+    except (pkcs7.SignatureError, trust.ChainError) as exc:
+        raise BackupError(E_VERIFY, f"invalid backup: {exc}") from exc
 
     try:
         out.write_bytes(plaintext)

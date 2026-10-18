@@ -55,8 +55,7 @@ def derive_iv_v1(password: bytes, size: int = KEY_LEN) -> bytes:
     return _sha1_salted(V1_IV_SALT, password, size)
 
 
-def derive_key_v2(password: bytes, salt: bytes, iterations: int,
-                  size: int = KEY_LEN) -> bytes:
+def derive_key_v2(password: bytes, salt: bytes, iterations: int, size: int = KEY_LEN) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password, salt, iterations, size)
 
 
