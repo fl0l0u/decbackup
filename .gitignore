@@ -6,3 +6,5 @@ dist/
 .codegraph/
 .ruff_cache/
 .venv/
+
+.opencode/
