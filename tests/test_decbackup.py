@@ -81,6 +81,12 @@ run("tail-bytes", "yt.bkup", None, "testpass", code=13)
 run("short-of-Y", "ys.bkup", None, "testpass", code=13)
 run("majversion-nonnumeric", "mvx.bkup", None, "testpass", code=13)
 
+# fuzz regressions: trailer bytes that load as certificates but raise on
+# lazy field access (duplicate policy extension / unparsable Name) must
+# fail closed into 7, never a traceback
+run("ext-duplication", "extdup.bkup", None, "testpass", code=7)
+run("lazy-field-parse", "lazyparse.bkup", None, "testpass", code=7)
+
 # v1 probes: same-length majversion 2->1 edit of a real v4.2.8 backup with
 # a copied (valid) trailer; content re-encrypted under the v1 KDF. Correct
 # v1 key -> decrypts, digest check fails (7) exactly as on both devices;

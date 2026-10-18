@@ -32,12 +32,18 @@ warnings.simplefilter("ignore")
 
 from decbackup import der, pkcs7  # noqa: E402
 from decbackup.backup import (  # noqa: E402
-    E_ALGO, E_DECRYPT, E_FILE, E_HEADER, E_MAJVERSION, E_PARSE, E_VERIFY,
-    BackupError, decrypt_backup,
+    E_ALGO,
+    E_DECRYPT,
+    E_FILE,
+    E_HEADER,
+    E_MAJVERSION,
+    E_PARSE,
+    E_VERIFY,
+    BackupError,
+    decrypt_backup,
 )
 
-VALID_CODES = {0, E_FILE, E_PARSE, E_VERIFY, E_HEADER, E_MAJVERSION,
-               E_DECRYPT, E_ALGO}
+VALID_CODES = {0, E_FILE, E_PARSE, E_VERIFY, E_HEADER, E_MAJVERSION, E_DECRYPT, E_ALGO}
 
 SEEDS = sorted((ROOT / "tests" / "vectors").glob("*.bkup"))
 FAILDIR = pathlib.Path(tempfile.gettempdir()) / "opencode" / "fuzz_failures"
@@ -53,27 +59,33 @@ def mutate(rng: random.Random, data: bytes) -> bytes:
         for _ in range(rng.randint(1, 16)):
             b[rng.randrange(len(b))] = rng.randrange(256)
     elif kind == 2:  # truncate
-        b = b[:rng.randrange(len(b) + 1)] if b else b
+        b = b[: rng.randrange(len(b) + 1)] if b else b
     elif kind == 3:  # append random junk
         b += bytes(rng.randrange(256) for _ in range(rng.randint(1, 4096)))
     elif kind == 4 and len(b) > 0x408:  # corrupt X (be32 at 0x400)
-        struct.pack_into(">I", b, 0x400, rng.choice(
-            [0, 1, 3, 0xFFFFFFFF, 0x7FFFFFFF, rng.randrange(1 << 32),
-             len(b), len(b) // 2]))
+        struct.pack_into(
+            ">I",
+            b,
+            0x400,
+            rng.choice(
+                [0, 1, 3, 0xFFFFFFFF, 0x7FFFFFFF, rng.randrange(1 << 32), len(b), len(b) // 2]
+            ),
+        )
     elif kind == 5 and len(b) > 0x40C:  # corrupt Y (be32 after trailer)
         x = struct.unpack_from(">I", b, 0x400)[0]
         off = 0x404 + min(x, len(b) - 0x404)
         if off + 4 <= len(b):
-            struct.pack_into(">I", b, off, rng.choice(
-                [0, 0xFFFFFFFF, len(b), rng.randrange(1 << 32)]))
+            struct.pack_into(
+                ">I", b, off, rng.choice([0, 0xFFFFFFFF, len(b), rng.randrange(1 << 32)])
+            )
     elif kind == 6 and len(b) > 0x400:  # header value corruption
         for _ in range(rng.randint(1, 8)):
             i = rng.randrange(min(0x400, len(b)))
-            b[i] = rng.choice(b"=0123456789abcdefx \t\n;\"\\.-")
+            b[i] = rng.choice(b'=0123456789abcdefx \t\n;"\\.-')
     elif b:  # splice random blob inside
         blob = bytes(rng.randrange(256) for _ in range(rng.randint(1, 256)))
         i = rng.randrange(len(b))
-        b[i:i + len(blob)] = blob
+        b[i : i + len(blob)] = blob
     return bytes(b)
 
 
@@ -82,9 +94,11 @@ def make_random(rng: random.Random) -> bytes:
     body = bytearray(rng.randrange(256) for _ in range(n))
     if n >= 0x400 and rng.random() < 0.7:
         head = b"[BACKUP]\nmajversion=%d\nalgo=%d\nversion=%s\n" % (
-            rng.choice([1, 2, 3, 9, 255]), rng.randrange(0, 60),
-            rng.choice([b"5.1.4", b"9", b"1", b"", b"90000"]))
-        body[:len(head)] = head[:len(body)]
+            rng.choice([1, 2, 3, 9, 255]),
+            rng.randrange(0, 60),
+            rng.choice([b"5.1.4", b"9", b"1", b"", b"90000"]),
+        )
+        body[: len(head)] = head[: len(body)]
     if n >= 0x408:
         struct.pack_into(">I", body, 0x400, rng.randrange(n))
     return bytes(body)
@@ -106,6 +120,7 @@ class _Alarm:
     def __enter__(self):
         def _boom(signum, frame):
             raise Slow()
+
         self.prev = signal.signal(signal.SIGALRM, _boom)
         signal.alarm(self.secs)
         return self
@@ -173,6 +188,8 @@ def main():
     fails = 0
     slows = 0
     corpus = [p.read_bytes() for p in SEEDS]
+    # regression seeds: every input that ever violated the contract
+    corpus += [p.read_bytes() for p in sorted(FAILDIR.glob("fail_*.bkup"))]
     for i in range(iters):
         if i % 20 == 19:
             data = make_random(rng)
@@ -193,8 +210,7 @@ def main():
             if fails >= 10:
                 print("stopping after 10 failures")
                 break
-    print(f"fuzz done: {i + 1} iterations, {fails} violations, "
-          f"{slows} slow (seed={seed})")
+    print(f"fuzz done: {i + 1} iterations, {fails} violations, {slows} slow (seed={seed})")
     return 1 if fails else 0
 
 

@@ -140,6 +140,18 @@ class SignerInfo:
 
         Returns the signer certificate DER on success.
         """
+        try:
+            return self._verify_inner(certs, content)
+        except SignatureError:
+            raise
+        except Exception as exc:
+            # cryptography parses certificate fields lazily and raises
+            # odd classes (ValueError, UnsupportedAlgorithm,
+            # DuplicateExtension, ...): at this attacker-input boundary
+            # anything unexpected must fail closed into error 7
+            raise SignatureError(f"certificate field error: {exc}") from exc
+
+    def _verify_inner(self, certs: list[bytes], content: bytes) -> bytes:
         signer_der = self.find_signer_cert(certs)
         if self.content_type not in (None, OID_PKCS7_DATA):
             raise SignatureError("unexpected contentType")

@@ -236,10 +236,20 @@ untested. Real backups always carry dotted versions → always pass.
 `analysis/fuzz.py` mutation-fuzzes container bytes and the PKCS#7/DER
 parsers against the contract: **any** input must end in a `BackupError`
 with a documented code, never a traceback, never a surviving output
-file, never a hang (5 s guard). Seeds are the real vectors; mutations
-cover bit flips, splices, truncations, X/Y field corruption and random
-files with plausible headers. Campaigns of 60k+ iterations across seeds
-have run clean; re-run before every release.
+file, never a hang (5 s guard). Seeds are the real vectors plus every
+input that ever violated the contract (`/tmp…/fuzz_failures/`, kept as
+regression seeds); mutations cover bit flips, splices, truncations, X/Y
+field corruption and random files with plausible headers.
+
+The first campaign (60k iterations, 2 seeds) surfaced one systemic
+class: `cryptography` parses certificate fields **lazily**, so a
+structurally-valid-but-tampered cert loads fine and then explodes on
+`.subject` / `.public_key()` / `.extensions` — including
+`DuplicateExtension`, which derives from bare `Exception`. Both verify
+boundaries (`SignerInfo.verify`, `trust.verify_chain`) now convert any
+unexpected parser exception into the fail-closed error 7. Two crash
+inputs are pinned as vectors (`extdup.bkup`, `lazyparse.bkup`).
+Re-runs: 90k iterations / 3 seeds clean; re-run before every release.
 
 ## 9. Test vectors (`tests/vectors/`)
 

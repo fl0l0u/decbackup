@@ -122,6 +122,18 @@ def verify_chain(leaf_der: bytes, untrusted: list[bytes]) -> list[bytes]:
     Validity dates are ignored, mirroring the original's NO_CHECK_TIME.
     Returns the chain (leaf first, DER blobs).
     """
+    try:
+        return _verify_chain_inner(leaf_der, untrusted)
+    except ChainError:
+        raise
+    except Exception as exc:
+        # lazy field parsing in tampered certificates raises assorted
+        # classes (ValueError, UnsupportedAlgorithm, DuplicateExtension,
+        # ...); everything must fail closed into the original's error 7
+        raise ChainError(f"certificate field error: {exc}") from exc
+
+
+def _verify_chain_inner(leaf_der: bytes, untrusted: list[bytes]) -> list[bytes]:
     trusted = load_trust_store()
     trusted_certs = [_load_cert(der) for der in trusted]
     others = [_load_cert(der) for der in untrusted]
