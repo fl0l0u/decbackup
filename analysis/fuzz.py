@@ -10,13 +10,21 @@ DERError.
 
 Seeds are the real device vectors; mutations are bit flips, byte
 splices, truncations, structural-field corruptions (X/Y be32s, header
-values) and pure-random files.  Deterministic under a fixed seed.
+values), trailer-region-only mutations (corrupt PKCS#7 bytes without
+touching the structure) and pure-random files.  Deterministic under a
+fixed seed.
+
+The sub-parsers get what backup.py actually feeds them: the real trailer
+slice ``data[0x404:0x404+X]`` (the whole container dies at TLV #1 every
+time, which made parser fuzzing near-vacuous) plus ``der.read_tlv`` at
+random offsets into the buffer.
 
     python analysis/fuzz.py [iterations] [seed]
 """
 
 import pathlib
 import random
+import shutil
 import signal
 import struct
 import sys
@@ -43,7 +51,8 @@ from decbackup.backup import (  # noqa: E402
     decrypt_backup,
 )
 
-VALID_CODES = {0, E_FILE, E_PARSE, E_VERIFY, E_HEADER, E_MAJVERSION, E_DECRYPT, E_ALGO}
+# a raised BackupError must never carry the success code — 0 is not here on purpose
+VALID_CODES = {E_FILE, E_PARSE, E_VERIFY, E_HEADER, E_MAJVERSION, E_DECRYPT, E_ALGO}
 
 SEEDS = sorted((ROOT / "tests" / "vectors").glob("*.bkup"))
 FAILDIR = pathlib.Path(tempfile.gettempdir()) / "opencode" / "fuzz_failures"
@@ -51,7 +60,7 @@ FAILDIR = pathlib.Path(tempfile.gettempdir()) / "opencode" / "fuzz_failures"
 
 def mutate(rng: random.Random, data: bytes) -> bytes:
     b = bytearray(data)
-    kind = rng.randrange(8)
+    kind = rng.randrange(9)
     if kind == 0 and b:  # bit flips
         for _ in range(rng.randint(1, 8)):
             b[rng.randrange(len(b))] ^= 1 << rng.randrange(8)
@@ -82,6 +91,15 @@ def mutate(rng: random.Random, data: bytes) -> bytes:
         for _ in range(rng.randint(1, 8)):
             i = rng.randrange(min(0x400, len(b)))
             b[i] = rng.choice(b'=0123456789abcdefx \t\n;"\\.-')
+    elif kind == 7 and len(b) > 0x408:  # corrupt INSIDE the trailer only
+        # DER-plausibility: keep X and the container structure intact and
+        # mutate real PKCS#7 bytes (structurally seeded), so the trailer
+        # slice fed to parse_signed_data stays interesting.
+        x = struct.unpack_from(">I", b, 0x400)[0]
+        lo, hi = 0x404, min(0x404 + x, len(b))
+        if hi > lo:
+            for _ in range(rng.randint(1, 8)):
+                b[rng.randrange(lo, hi)] ^= 1 << rng.randrange(8)
     elif b:  # splice random blob inside
         blob = bytes(rng.randrange(256) for _ in range(rng.randint(1, 256)))
         i = rng.randrange(len(b))
@@ -131,7 +149,7 @@ class _Alarm:
         return False
 
 
-def check_container(rng: random.Random, data: bytes, tmp: pathlib.Path, verify: bool = True):
+def check_container(data: bytes, tmp: pathlib.Path, verify: bool = True):
     out = tmp / "fuzz.out"
     try:
         out.unlink(missing_ok=True)
@@ -139,7 +157,7 @@ def check_container(rng: random.Random, data: bytes, tmp: pathlib.Path, verify: 
         pass
     try:
         with _Alarm(5):
-            decrypt_backup(_spill(rng, data, tmp), out, "testpass", verify=verify)
+            decrypt_backup(_spill(data, tmp), out, "testpass", verify=verify)
     except Slow:
         raise
     except BackupError as exc:
@@ -148,35 +166,55 @@ def check_container(rng: random.Random, data: bytes, tmp: pathlib.Path, verify: 
         if out.exists():
             raise Violation(f"output survived failure {exc.code}")
     except Exception:
-        raise Violation(traceback.format_exc(limit=6)) from None
+        tb = traceback.format_exc(limit=6)
+        if out.exists():
+            raise Violation(f"output survived crash\n{tb}") from None
+        raise Violation(tb) from None
     finally:
         out.unlink(missing_ok=True)
 
 
-_SPILL = [None]
-
-
-def _spill(rng: random.Random, data: bytes, tmp: pathlib.Path):
+def _spill(data: bytes, tmp: pathlib.Path):
     f = tmp / "in.bkup"
     f.write_bytes(data)
     return f
 
 
+def trailer_slice(data: bytes) -> bytes:
+    """Mirror backup.py: parse X from the mutated container and return the
+    trailer slice it points at — what ``parse_signed_data`` really sees."""
+    if len(data) < 0x404:
+        return data  # too short to even carry X; feed whatever there is
+    x = struct.unpack_from(">I", data, 0x400)[0]
+    return data[0x404 : 0x404 + x]
+
+
 def check_parsers(rng: random.Random, data: bytes):
-    try:
-        pkcs7.parse_signed_data(data)
-    except (pkcs7.SignatureError, der.DERError):
-        pass
-    except Exception:
-        raise Violation("parse_signed_data: " + traceback.format_exc(limit=6))
-    # der must never crash either
-    try:
-        t, vs, ln, ni = der.read_tlv(data, 0)
-        list(der.children(data, vs, ni))
-    except der.DERError:
-        pass
-    except Exception:
-        raise Violation("der: " + traceback.format_exc(limit=6))
+    # parse_signed_data expects the trailer slice, not the whole container
+    # (feeding it the whole file dies at TLV #1 every time and makes
+    # parser fuzzing near-vacuous), but feed both: neither may traceback.
+    blobs = [data]
+    trailer = trailer_slice(data)
+    if trailer != data:
+        blobs.append(trailer)
+    for blob in blobs:
+        try:
+            pkcs7.parse_signed_data(blob)
+        except (pkcs7.SignatureError, der.DERError):
+            pass
+        except Exception:
+            raise Violation("parse_signed_data: " + traceback.format_exc(limit=6))
+    # der must never crash either, at any offset into the buffer
+    for blob in blobs:
+        for _ in range(2):
+            off = rng.randrange(len(blob) + 1)
+            try:
+                t, vs, ln, ni = der.read_tlv(blob, off)
+                list(der.children(blob, vs, ni))
+            except der.DERError:
+                pass
+            except Exception:
+                raise Violation("der: " + traceback.format_exc(limit=6))
 
 
 def main():
@@ -184,13 +222,24 @@ def main():
     seed = int(sys.argv[2]) if len(sys.argv) > 2 else 20261017
     rng = random.Random(seed)
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="decbackup-fuzz-"))
+    try:
+        fails, slows, done = run(rng, iters, tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"fuzz done: {done} iterations, {fails} violations, {slows} slow (seed={seed})")
+    return 1 if fails else 0
+
+
+def run(rng: random.Random, iters: int, tmp: pathlib.Path):
     FAILDIR.mkdir(parents=True, exist_ok=True)
     fails = 0
     slows = 0
+    done = 0
     corpus = [p.read_bytes() for p in SEEDS]
     # regression seeds: every input that ever violated the contract
     corpus += [p.read_bytes() for p in sorted(FAILDIR.glob("fail_*.bkup"))]
     for i in range(iters):
+        done = i + 1
         if i % 20 == 19:
             data = make_random(rng)
         elif i < len(corpus):
@@ -198,7 +247,7 @@ def main():
         else:
             data = mutate(rng, rng.choice(corpus))
         try:
-            check_container(rng, data, tmp, verify=(i % 2 == 0))
+            check_container(data, tmp, verify=(i % 2 == 0))
             check_parsers(rng, data)
         except Slow:
             slows += 1
@@ -210,8 +259,7 @@ def main():
             if fails >= 10:
                 print("stopping after 10 failures")
                 break
-    print(f"fuzz done: {i + 1} iterations, {fails} violations, {slows} slow (seed={seed})")
-    return 1 if fails else 0
+    return fails, slows, done
 
 
 if __name__ == "__main__":

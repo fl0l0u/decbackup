@@ -7,32 +7,42 @@ shifts the whole file, breaks X, and confounds the result -- an early
 round of probes was invalidated this way; csh also rejects ``2>/dev/null``
 on dd, silently turning "tamper" commands into no-ops).
 
-Run the `real` column against the device with decbackup, the `clone`
-column with `python -m decbackup`; both are expected to print the same
-code.  Codes: see decbackup/backup.py and RECON.md.
-
+The `real` column is a **recorded device observation table**: the codes
+were observed on the VM with the real decbackup (RECON.md §6/§9/§10).
 The vectors in tests/vectors/ are byte-identical to the device-side probe
-files (sha256-verified), so the real-tool codes below apply to them
-directly.
+files, so running this script locally against the clone reproduces the
+parity check without a live device -- `clone` is what the clone returns
+right now; any row where it drifts from `real` is a regression.
+
+    python analysis/probes.py
+
+Codes: see decbackup/backup.py and RECON.md.
 """
 
-import hashlib
 import pathlib
+import tempfile
 
 VECTORS = "vectors"
 
 PROBES = [
-    # name            edit                          real  clone
-    ("test.bkup",     "none",                        0,   0),
-    ("nopass.bkup",   "encbackup without -p",         0,   0),
-    ("big.bkup",      "payload 5.7KB",                0,   0),
-    ("mid.bkup",      "payload 23KB (multi-chunk)",   0,   0),
-    ("trunc.bkup",    "truncated to 0x3FF",           8,   8),
-    ("xzero.bkup",    "X (be32@0x400) zeroed",        6,   6),
-    ("ct.bkup",       "ciphertext byte 4800 zeroed",  7,   7),
-    ("cert.bkup",     "8 cert bytes at 2000 zeroed",  7,   7),
-    ("mv3.bkup",      "majversion=2 -> majversion=3", 12, 12),
-    ("v9.bkup",       'version="9    " (padded)',     7,   7),
+    # name            edit                              real  clone
+    ("test.bkup",     "none",                             0,   0),
+    ("nopass.bkup",   "encbackup without -p",             0,   0),
+    ("big.bkup",      "payload 5.7KB",                    0,   0),
+    ("mid.bkup",      "payload 23KB (multi-chunk)",       0,   0),
+    ("trunc.bkup",    "truncated to 0x3FF",               8,   8),
+    ("xzero.bkup",    "X (be32@0x400) zeroed",            6,   6),
+    ("ct.bkup",       "ciphertext byte 4800 zeroed",      7,   7),
+    ("cert.bkup",     "8 cert bytes at 2000 zeroed",      7,   7),
+    ("mv3.bkup",      "majversion=2 -> majversion=3",    12,  12),
+    ("v9.bkup",       'version="9    " (padded)',         7,   7),
+    ("yt.bkup",       "+16 zero bytes appended",         13,  13),
+    ("ys.bkup",       "last 16 bytes removed",           13,  13),
+    ("mvx.bkup",      "majversion=x (same length)",      13,  13),
+    ("v1probe.bkup",  "v1 path, correct key window",      7,   7),
+    ("v1badkey.bkup", "v1 path, shifted key window",     13,  13),
+    ("extdup.bkup",   "duplicate-extension cert",         7,   7),
+    ("lazyparse.bkup","lazy-parsed cert field",           7,   7),
 ]
 
 ADDITIONAL_REAL_RESULTS = """
@@ -58,22 +68,23 @@ def main():
     passwords = {"test.bkup": "testpass", "big.bkup": "BigPass789",
                  "mid.bkup": "MidPass321", "nopass.bkup": ""}
     ok = True
-    for name, edit, real, clone in PROBES:
-        path = v / name
-        if not path.exists():
-            print(f"{name:14s} MISSING")
-            ok = False
-            continue
-        try:
-            decrypt_backup(path, "/tmp/probe.out",
-                           passwords.get(name, "testpass"))
-            got = 0
-        except BackupError as exc:
-            got = exc.code
-        status = "OK " if got == clone == real else "FAIL"
-        if status == "FAIL":
-            ok = False
-        print(f"{status} {name:14s} real={real:2d} clone={got:2d}  ({edit})")
+    with tempfile.TemporaryDirectory(prefix="decbackup-probe-") as tmpdir:
+        out = str(pathlib.Path(tmpdir) / "probe.out")
+        for name, edit, real, clone in PROBES:
+            path = v / name
+            if not path.exists():
+                print(f"{name:14s} MISSING")
+                ok = False
+                continue
+            try:
+                decrypt_backup(path, out, passwords.get(name, "testpass"))
+                got = 0
+            except BackupError as exc:
+                got = exc.code
+            status = "OK " if got == clone == real else "FAIL"
+            if status == "FAIL":
+                ok = False
+            print(f"{status} {name:14s} real={real:2d} clone={got:2d}  ({edit})")
     print(ADDITIONAL_REAL_RESULTS)
     return 0 if ok else 1
 

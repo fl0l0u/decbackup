@@ -9,6 +9,7 @@ dumpall = '--all' in wanted
 wanted = [w for w in wanted if not w.startswith('--')]
 f = open(path,'rb'); e = ELFFile(f)
 symtab = e.get_section_by_name('.symtab')
+if symtab is None: sys.exit(f"{path}: no .symtab (stripped binary?) — use symbols.py for .dynsym")
 funcs = {s.name:(s['st_value'], s['st_size']) for s in symtab.iter_symbols() if s['st_info']['type']=='STT_FUNC'}
 # build plt map: jmp qword [rip+X] in .plt/.plt.sec -> GOT addr -> reloc name
 got = {}
@@ -25,11 +26,10 @@ for nm in ('.plt','.plt.sec'):
     if not s: continue
     for i in md0.disasm(s.data(), s['sh_addr']):
         if i.mnemonic=='jmp' and 'rip' in i.op_str:
-            v = int(i.op_str.split('[')[1].rstrip(']').split('+')[-1],16) if '+' in i.op_str else 0
             # capstone gives 'qword ptr [rip + 0x...]'
             try:
                 tgt = i.address + i.size + int(i.op_str.rsplit('+',1)[1].rstrip(']'),16)
-            except: tgt=None
+            except ValueError: tgt=None
             if tgt in got: pltmap[i.address]=got[tgt]
         if i.mnemonic=='push' and 'rip' in i.op_str and 'qword' not in i.op_str:
             pltmap[i.address]=pltmap.get(i.address,'?')
@@ -42,7 +42,8 @@ secs = [s for s in e.iter_sections() if s['sh_type']=='SHT_PROGBITS']
 def read_at(addr,n):
     for s in secs:
         if s['sh_addr'] <= addr < s['sh_addr']+s['sh_size']:
-            return s.data()[addr-s['sh_addr']:addr-s['sh_addr']+n]
+            off = addr-s['sh_addr']
+            return s.data()[off:off+min(n, s['sh_size']-off)]  # clamp to section end
     return None
 def cstr(addr):
     d = read_at(addr,256)
@@ -52,7 +53,10 @@ md = Cs(CS_ARCH_X86, CS_MODE_64); md.detail=True
 def disasm(name):
     if name not in funcs: print("NOFUNC", name); return
     addr, size = funcs[name]
+    # zero-size symbols (common in stripped/partial symtabs): dump up to
+    # 4096 bytes but read_at() clamps at the containing section's end
     d = read_at(addr, size if size else 4096)
+    if not d: print("NODATA", name); return
     print(f"===== {name} @ {hex(addr)} size={size} =====")
     for i in md.disasm(d, addr):
         tag=""
@@ -63,7 +67,7 @@ def disasm(name):
                 else:
                     for fn,(a,sz) in funcs.items():
                         if a==t: tag="  ; -> "+fn
-            except: pass
+            except ValueError: pass
         # annotate rip lea string refs
         if i.mnemonic=='lea' and 'rip' in i.op_str and 'ptr [' in i.op_str:
             try:
