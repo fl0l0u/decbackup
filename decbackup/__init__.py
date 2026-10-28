@@ -5,6 +5,6 @@ container handling of ``libncrypto.so`` from Stormshield SNS v5.1.4,
 derived by reverse engineering (see ``RECON.md``).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .backup import BackupError, decrypt_backup  # noqa: F401
