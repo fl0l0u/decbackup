@@ -2,8 +2,9 @@
 
 Target: `/usr/Firewall/sbin/decbackup` + `libncrypto.so` from **Stormshield
 Network Security v5.1.4** (SNS-BSD 5.1.4, EVA1 XL-VM). All addresses below
-are file offsets in the extracted binaries (`bin/` on the VM, mirrored under
-`analysis/` tooling paths).
+are file offsets into the binaries extracted from the device; those
+artifacts are **not in this repo** (the extraction workflow is §1), so
+resolve an address only against your own extracted copy.
 
 ## 1. Environment & extraction workflow
 
@@ -36,9 +37,13 @@ offset        size     contents
                        zero-padded to 1 KiB
 0x400         4        be32 X — length of the PKCS#7 trailer
 0x404         X        detached PKCS#7 SignedData (signature + certs)
-0x404+X       4        be32 Y — plaintext length (== filesize - 0x408 - X)
+0x404+X       4        be32 Y — ciphertext length (== filesize - 0x408 - X)
 0x408+X       Y        AES-128-CBC ciphertext, PKCS#7 padding
 ```
+
+Y counts the **encrypted** span, PKCS#7 padding included (measured:
+`test.bkup` Y=2064 over a 2048-byte plaintext). The parser does **not
+trust** it — decryption is bounded by filesize (yt/ys probes, §6).
 
 Header keys seen: `majversion=2`, `algo=1`, `date="…"`, `model`, `version`,
 `serial`, `advanced`, `description`, `content`, `iv` (hex), `salt` (hex),
@@ -59,7 +64,9 @@ and the tool fails. A bug; the clone simply reads the whole file.
 
 Selected by header `majversion` (`fwcrypto_get_backup_majversion`,
 default 1 when the key is absent; 1 or 2 accepted, anything else → error 12
-`Unknown backup majversion`).
+`Unknown backup majversion`). "Anything else" applies to *parsed* numbers
+only: an unparsable value falls back to the default 1 exactly like an
+absent key (mvx probe, §6).
 
 * **v2** (`fwcrypto_derivekey`): `key = PBKDF2-HMAC-SHA256(password,
   unhex(salt), pbkdf_iterations, 16)`; `iv = unhex(iv)`.
@@ -69,12 +76,12 @@ default 1 when the key is absent; 1 or 2 accepted, anything else → error 12
   (`463538798d…09d221` + `2807a5ef00…0e4e`); the getters' `lea` targets
   resolve to pool+0 and pool+16 in *both* the 5.1.4 and 4.2.8 binaries.
   An earlier reading (`212807a5…` / `0046353879…`) was a one-byte
-  vaddr→file-offset slip, corrected in §10 by direct experiment.
+  vaddr→file-offset slip, corrected in §12 by direct experiment.
   For sizes >20 the fill is
   `buf[i] = (size-1 + (size-i)*0xEB) & 0xFF` — unreachable for AES-128.
   5.1.4 `encbackup` cannot emit v1 (no version flag in getopt
   `i:o:p:c:t:n:P`), but the **key derivation is now empirically confirmed**
-  (§10): a v1-header archive whose ciphertext was made with these
+  (§12): a v1-header archive whose ciphertext was made with these
   constants decrypts cleanly on both VMs (reaches the digest check → 7),
   while the shifted-salt variant fails at padding (→ 13) on both.
 
@@ -84,7 +91,8 @@ Cipher: `algo=1` → AES-128-CBC (`EVP_aes_128_cbc`); anything else → error
 ## 4. Signature scheme (CONFIRMED end-to-end)
 
 Detached PKCS#7 SignedData (OpenSSL 3 `PKCS7_*` via
-`VerifyMajSignatureInit` 0x14a5x / `VerifySignatureFinal`):
+`VerifyMajSignatureInit` 0x14a5? / `VerifySignatureFinal`; last nibble
+unresolved from notes):
 
 * **Signed content** = full 0x400-byte header block (text + NUL padding —
   implemented as `strlen` + zero-pad loop) **followed by the decrypted
@@ -158,6 +166,11 @@ Usage : () -i <backup> -o <output archive>
 
 ## 6. Error codes (empirical matrix, real device vs clone — parity)
 
+`analysis/probes.py` renders this matrix as a static table, run locally
+against `tests/vectors/` (no device needed; the `real` column holds codes
+recorded on the device). The **maintained** parity check is
+`tests/test_decbackup.py` (run in CI); keep the two in sync.
+
 | code | meaning | proven by |
 |---|---|---|
 | 0 | success | all vectors |
@@ -165,7 +178,7 @@ Usage : () -i <backup> -o <output archive>
 | 6 | signature trailer unparsable / doesn't fit first chunk; crypto params missing | X=0 → 6; sed-shifted files → 6 |
 | 7 | verification failed (content digest, attribute signature, chain) | 1-byte ciphertext tamper → 7; cert bytes zeroed → 7; header edit → 7 |
 | 8 | file shorter than 0x400 | trunc.bkup → 8 |
-| 11 | short write to the output file (residual default err; seen when `-o /dev/stdout` truncates the stream) | 4.2.8 binary, v1 probe to /dev/stdout |
+| 11 | short write to the output file (residual default err; seen when `-o /dev/stdout` truncates the stream) — **not reproduced in clone**: v4.2.8 short-write artifact with no clone code path | 4.2.8 binary, v1 probe to /dev/stdout |
 | 12 | unknown majversion (`Unknown backup majversion: %d`) or version gate (`Invalid archive`) | majversion=3 → 12; version=9 → 12 |
 | 13 | decrypt failed — in practice wrong password (EVP_CipherFinal padding) | wrongpass → 13 |
 | 32 | unsupported algo | algo=2 → 32 |
@@ -223,31 +236,20 @@ untested. Real backups always carry dotted versions → always pass.
 3. `cmp` is not whitelisted; csh reports command-not-found as exit 1,
    which looks exactly like "files differ". Use `openssl dgst -sha256`.
 4. Probe files: byte-identical local/VM copies verified by sha256
-   (see `analysis/probes.py`) so device-observed codes apply to the vectors.
+   computed manually on both sides at extraction time (digests are not
+   stored in the repo), so device-observed codes apply to the vectors.
 
-## 8. Open items / uncertainties
-
-* v1 KDF **empirically confirmed** on both VMs (§10). The IV window is
-  static-confirmed (identical `lea`-pool layout in both binaries) but
-  RC-invisible in probes (CBC padding ignores the IV and the digest can
-  never match a copied trailer); it is the pool[0:16] window.
-* Exact digit-count cap of the version gate parser (implemented ≤4).
-* Error code when the *output* file can't be created: assumed 1.
-* `pbkdf_iterations` default when the key is missing: assumed 1
-  (`mov esi, 1` near the getter); real files always carry the key.
-* A crafted `pbkdf_iterations` of ~10^9 stalls verification for minutes
-  on the clone AND on the device (the value is trusted straight from the
-  header) — DoS-by-input is a shared property, not a clone deviation.
-
-## 7b. Robustness contract (fuzzing)
+## 8. Robustness contract (fuzzing)
 
 `analysis/fuzz.py` mutation-fuzzes container bytes and the PKCS#7/DER
 parsers against the contract: **any** input must end in a `BackupError`
 with a documented code, never a traceback, never a surviving output
 file, never a hang (5 s guard). Seeds are the real vectors plus every
-input that ever violated the contract (`/tmp…/fuzz_failures/`, kept as
-regression seeds); mutations cover bit flips, splices, truncations, X/Y
-field corruption and random files with plausible headers.
+input that ever violated the contract (`$TMPDIR/opencode/fuzz_failures/`,
+in practice `/tmp/opencode/fuzz_failures/` — a machine-local, volatile
+scratch dir, not versioned; the pinned regression vectors are
+`extdup.bkup` + `lazyparse.bkup`); mutations cover bit flips, splices,
+truncations, X/Y field corruption and random files with plausible headers.
 
 The first campaign (60k iterations, 2 seeds) surfaced one systemic
 class: `cryptography` parses certificate fields **lazily**, so a
@@ -259,12 +261,55 @@ unexpected parser exception into the fail-closed error 7. Two crash
 inputs are pinned as vectors (`extdup.bkup`, `lazyparse.bkup`).
 Re-runs: 90k iterations / 3 seeds clean; re-run before every release.
 
-## 9. Test vectors (`tests/vectors/`)
+## 9. Clone deviations from the device (security hardening)
+
+Deliberate behavior changes where the clone is *not* device-faithful:
+
+* **Chain terminators**: a self-signed chain end must match an embedded
+  CA certificate **byte-exactly**. The device binds through an OpenSSL
+  store lookup to the genuine cert; the clone's earlier subject+serial
+  match was exploitable (forged chains accepted).
+* **Chain signature algs**: explicit allow-list — unknown OIDs rejected,
+  `…1.1.5` → SHA-1, MD5 not accepted.
+* **certificatePolicies**: an extension that fails to parse → reject
+  (previously fail-open).
+* **Issuers**: intermediate/root issuers must carry `CA:TRUE` (matches
+  the device's INVALID_CA).
+* **signerInfos**: **all** signerInfos are verified (previously only the
+  first).
+* **Structure**: duplicate or missing `contentType` authAttrs, unknown
+  PKCS#7 signature algs, and malformed DER children (child extending
+  beyond its parent, oversized OID components) → reject.
+* **pbkdf_iterations**: ≥ 2^31 → error 6; ASCII digits only. Device
+  analog: OpenSSL "iteration value is too great" (exact code unprobed).
+* **iv**: wrong-length iv / whitespace-laced hex → error 6 at parse time
+  (inferred).
+* **`-P`**: now actually prompts without echo on a tty (parity intent);
+  pipe-without-tty → empty password is unchanged (device-probed 13).
+* **Passwords**: non-UTF-8 passwords remain a clone limitation (the
+  device uses raw argv bytes).
+
+## 10. Open items / uncertainties
+
+* v1 KDF **empirically confirmed** on both VMs (§12). The IV window is
+  static-confirmed (identical `lea`-pool layout in both binaries) but
+  RC-invisible in probes (CBC padding ignores the IV and the digest can
+  never match a copied trailer); it is the pool[0:16] window.
+* Exact digit-count cap of the version gate parser (implemented ≤4).
+* Error code when the *output* file can't be created: assumed 1.
+* `pbkdf_iterations` default when the key is missing: assumed 1
+  (`mov esi, 1` near the getter); real files always carry the key.
+* A crafted `pbkdf_iterations` of ~10^9 stalls verification for minutes
+  on the clone AND on the device (the value is trusted straight from the
+  header) — DoS-by-input is a shared property, not a clone deviation.
+
+## 11. Test vectors (`tests/vectors/`)
 
 Made with `encbackup -i <tar> -o <bkup> -t all -p <pass>` on the device,
 fetched by base64-over-ssh, and cross-validated against the real
 `decbackup` output. Error vectors are byte-identical to the device-side
-probe files (sha256 listed in `analysis/probes.py` history).
+probe files — verified by comparing digests manually on both sides at
+extraction time; the digests themselves were never recorded in the repo.
 
 Privacy note: the vectors are real device output and cannot be edited
 without breaking the signature they exercise, so they carry the lab
@@ -279,9 +324,9 @@ values shown below. No private key material is present in any vector.
 | big.bkup | big.tar | `BigPass789` | 0 |
 | mid.bkup | mid.tar (23 KiB, multi-chunk) | `MidPass321` | 0 |
 | trunc/xzero/ct/cert/mv3/v9 | — | `testpass` | 8/6/7/7/12/7 |
-| v1probe.bkup / v1badkey.bkup | test.tar (§10, v1-encrypted) | `testpass` | 7 / 13 |
+| v1probe.bkup / v1badkey.bkup | test.tar (§12, v1-encrypted) | `testpass` | 7 / 13 |
 
-## 10. Second VM: SNS v4.2.8
+## 12. Second VM: SNS v4.2.8
 
 Older box, same EVA1-VM hardware line, the same default evaluation-VM
 serial as the 5.1.4 box, clock

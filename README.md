@@ -26,6 +26,7 @@
   <a href="#usage">Usage</a> •
   <a href="#the-format">The Format</a> •
   <a href="#development">Development</a> •
+  <a href="#releasing">Releasing</a> •
   <a href="#license">License</a>
 </p>
 
@@ -44,9 +45,13 @@ plus an empirical error-code matrix against a live device (see
 |---------|-------------|
 | **Byte-exact format support** | `[BACKUP]` header, detached PKCS#7 trailer, AES-128-CBC payload |
 | **Both password schemes** | v2 (PBKDF2-HMAC-SHA256) and legacy v1 (salted-SHA1) key derivation |
-| **Full signature verification** | RSA over PKCS#7 authAttrs, messageDigest over header+payload, chain to the four CAs embedded in libncrypto, policy 1.3.6.1.4.1.11256.2.3, dates ignored (as on the device) |
+| **Full signature verification** | RSA over PKCS#7 authAttrs, messageDigest over header+payload, chain to the four CA certificates embedded in libncrypto, policy 1.3.6.1.4.1.11256.2.3, dates ignored (as on the device) |
 | **Original CLI parity** | same flags (`-i -o -p -P -d`), same messages, same numeric error codes (0/1/6/7/8/12/13/32) — validated against the real binary on device |
 | **Tiny dependency set** | `cryptography` only; DER/PKCS#7 parsing is in-tree (`decbackup/der.py`, `pkcs7.py`) |
+
+About the v1 row: no released SNS version emits the legacy v1 scheme (both
+tested `encbackup` builds write v2), so the v1 path is validated only
+through failure-path vectors, not a decryptable v1 backup.
 
 ## Installation
 
@@ -83,6 +88,10 @@ Success is silent (exit 0), exactly like the original; failure prints
 `decrypt and/or verify backup failed (%d)` with the appliance's own error
 code. `-d` prints the decoded header block after a successful run.
 
+Output-file contract (same as the device): the `-o` file is created and
+truncated early, and **deleted on every failure path** — a pre-existing
+file at `-o` is destroyed even when the backup is rejected.
+
 `--no-verify` has no counterpart on the device: it skips trailer
 parsing and signature/chain checks to rescue backups whose signature
 region is corrupted. It prints a warning and the output is
@@ -106,9 +115,13 @@ except BackupError as e:
 0x000   0x400   [BACKUP] key=value header, NUL-terminated, zero-padded
 0x400   4       be32 X — PKCS#7 trailer length
 0x404   X       detached PKCS#7 SignedData (device cert + CA intermediate)
-0x404+X 4       be32 Y — payload length
-0x408+X Y       AES-128-CBC ciphertext (PBKDF2-SHA256 key, PKCS#7 padding)
+0x404+X 4       be32 Y — ciphertext length
+0x408+X Y       AES-128-CBC ciphertext (PBKDF2-SHA256 key¹, PKCS#7 padding)
 ```
+
+¹ v2 key derivation; the legacy v1 scheme instead uses a salted-SHA1
+derivation (see [RECON.md](RECON.md)). Y counts ciphertext bytes including
+the padding, so it exceeds the plaintext by a partial or full AES block.
 
 The signature covers the **full 0x400-byte header block plus the decrypted
 payload**; it chains device cert → *Stormshield Network Security Products
@@ -122,13 +135,19 @@ readable forever. Full details in [RECON.md](RECON.md).
 decbackup/        the package (cli, backup format, crypto, pkcs7, der, trust, certs/)
 analysis/         RE tooling: disassembler, strings, symbol lists, the device
                   extraction script and the empirical error-code matrix
-tests/vectors/    real encbackup-produced backups + expected payloads
-                  (created on an SNS 5.1.4 device, cross-validated against
-                  the stock decbackup)
+tests/vectors/    device-derived containers + expected payloads:
+                  test/nopass/big/mid are stock encbackup output from an
+                  SNS 5.1.4 device (cross-validated against the stock
+                  decbackup); v1probe/v1badkey are patched v4.2.8
+                  containers; extdup/lazyparse are pinned fuzz-crash
+                  mutations; trunc/xzero/ct/cert/mv3/v9/yt/ys/mvx are
+                  byte-edited probes
 legacy/           the earlier single-file iteration (kept for reference)
 ```
 
 ```bash
+pip install -e ".[dev]"               # dev extras: ruff
+ruff check .                          # lint (same as CI)
 python tests/test_decbackup.py        # exit code = number of failures
 python analysis/probes.py             # real-vs-clone error-code parity table
 python analysis/fuzz.py 30000         # robustness contract fuzzer
@@ -137,9 +156,10 @@ python analysis/fuzz.py 30000         # robustness contract fuzzer
 ## Releasing
 
 Tagged pushes (`v*`) build an sdist + wheel, smoke-test the wheel against
-the bundled device vectors, and publish to PyPI via trusted publishing
-(see `.github/workflows/release.yml`). Pushes and PRs run lint + the
-error-code parity suite on Python 3.9–3.13
+one bundled vector (`test.bkup`: clean decrypt, plus the wrong-password
+failure contract), and publish to PyPI via trusted publishing
+(see `.github/workflows/release.yml`). Pushes to `master`/`main` and pull
+requests run lint + the error-code parity suite on Python 3.9–3.13
 (`.github/workflows/ci.yml`).
 
 ```bash
