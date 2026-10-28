@@ -23,7 +23,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 #: AES-128-CBC
 ALGO_AES_128_CBC = 1
 
-#: salt constants embedded in libncrypto.so .rodata at 0x1b41f / 0x1b40f
+#: salt constants from the shared 48-byte pool in libncrypto.so .rodata
+#: (RECON §10, resolved via the `lea` windows in both binaries): the IV
+#: sits at file offset 0x1b410 (pool+0x00), the key at 0x1b420 (pool+0x10)
 V1_KEY_SALT = bytes.fromhex("2807a5ef00620c4b62f32e0985e30e4e")
 V1_IV_SALT = bytes.fromhex("463538798d48c8c0323df3e75109d221")
 
