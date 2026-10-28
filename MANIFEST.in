@@ -1,0 +1,5 @@
+# The sdist must carry the runnable test suite promised in the README:
+# tests/test_decbackup.py alone is useless without the binary device vectors.
+graft tests
+include LICENSE
+include RECON.md
